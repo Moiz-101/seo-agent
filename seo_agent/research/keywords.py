@@ -4,9 +4,12 @@ Note: pytrends gives relative interest + related/rising queries, not exact
 search volume (that needs a paid tool or a Google Ads Keyword Planner
 account). For a free pipeline this is the best available signal.
 """
+import logging
 import time
 
 from pytrends.request import TrendReq
+
+logger = logging.getLogger(__name__)
 
 
 def _related_queries_with_retry(pytrends: TrendReq, topic: str, geo: str, attempts: int = 3) -> dict:
@@ -52,8 +55,9 @@ def research_keywords(seed_topics: list[str], geo: str = "IN") -> list[dict]:
                             "source": f"google_trends_{kind}",
                             "signal": float(row.get("value", 0)),
                         }
-        except Exception:
+        except Exception as e:
             # still flaky after retries; skip this topic rather than crash the whole pipeline
+            logger.warning("Google Trends lookup failed for topic %r: %s", topic, e)
             continue
 
     return sorted(found.values(), key=lambda k: k["signal"], reverse=True)

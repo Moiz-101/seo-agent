@@ -28,6 +28,12 @@ def run_research(url: str, seed_topics: list[str]) -> dict:
     raw_keywords = kw_research.research_keywords(seed_topics)
     clusters = kw_research.cluster_keywords(raw_keywords)
 
+    if not clusters:
+        # Google Trends is unreliable from some networks/cloud IPs and can return
+        # nothing at all. Fall back to the seed topics themselves so the pipeline
+        # still produces content instead of silently generating zero articles.
+        clusters = [[{"keyword": topic, "source": "seed_topic", "signal": 0}] for topic in seed_topics]
+
     top_keywords = [k["keyword"] for k in raw_keywords[:10]] or seed_topics
     competitors = competitor_research.top_competitors_for_keywords(top_keywords, url)
 
