@@ -36,6 +36,7 @@ def _authorized(update: Update) -> bool:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return
+    await update.message.reply_text(f"Aapki Telegram User ID: {update.effective_user.id}")
     await update.message.reply_text(
         "SEO Agent ready.\n\n"
         "Naya site shuru karne ke liye:\n"
