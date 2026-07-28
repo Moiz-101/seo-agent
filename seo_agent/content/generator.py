@@ -5,7 +5,7 @@ from config import GEMINI_API_KEY
 
 genai.configure(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-1.5-flash"  # free-tier friendly; use gemini-1.5-pro for higher quality if quota allows
+MODEL_NAME = "gemini-flash-latest"  # alias that Google keeps pointed at the current flash model
 
 CONTENT_PROMPT = """You are an expert SEO content writer. Write a complete, publish-ready
 article optimized for the primary keyword below.

@@ -61,7 +61,13 @@ async def newsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     seed_topics = [t.strip() for t in topics_part.split(",") if t.strip()]
 
     await update.message.reply_text(f"Research shuru kar raha hoon: {url} ...")
-    site = await asyncio.to_thread(pipeline.start_new_site, url, seed_topics)
+    try:
+        site = await asyncio.to_thread(pipeline.start_new_site, url, seed_topics)
+    except Exception as e:
+        logger.exception("Research failed for %s", url)
+        await update.message.reply_text(f"Research karte waqt error aaya: {e}")
+        return
+
     await update.message.reply_text(
         f"Research complete.\nKeywords found: {len(site['keywords'])}\n"
         f"Competitors: {', '.join(site['competitors']) or 'none found'}\n"
@@ -72,7 +78,13 @@ async def newsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _generate_and_send_next(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
-    result = await asyncio.to_thread(pipeline.generate_next_content_doc, url)
+    try:
+        result = await asyncio.to_thread(pipeline.generate_next_content_doc, url)
+    except Exception as e:
+        logger.exception("Content generation failed for %s", url)
+        await update.message.reply_text(f"Article generate karte waqt error aaya: {e}")
+        return
+
     if result is None:
         state_store.update_site(url, stage="MONITORING")
         await update.message.reply_text("Saara planned content bhej diya gaya hai. Ab sirf ranking monitor karunga.")
@@ -103,7 +115,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if "go ahead" in text or text in ("go", "done", "live ho gaya"):
         await update.message.reply_text("Live page check kar raha hoon aur agla step shuru kar raha hoon...")
-        result = await asyncio.to_thread(pipeline.handle_go_ahead, url)
+        try:
+            result = await asyncio.to_thread(pipeline.handle_go_ahead, url)
+        except Exception as e:
+            logger.exception("Technical audit failed for %s", url)
+            await update.message.reply_text(f"Technical audit karte waqt error aaya: {e}")
+            return
+
         await update.message.reply_document(
             document=open(result["report_path"], "rb"),
             caption="Technical SEO report (is update ke baad)",
