@@ -1,21 +1,52 @@
-"""Free keyword research via Google Trends (pytrends).
+"""Free keyword research combining two sources:
 
-Note: pytrends gives relative interest + related/rising queries, not exact
-search volume (that needs a paid tool or a Google Ads Keyword Planner
-account). For a free pipeline this is the best available signal.
+1. Google Trends (pytrends) - related/rising queries with a relative
+   interest signal. Best-effort: Google aggressively 429s requests coming
+   from cloud/datacenter IPs (Render, AWS, etc.), so this frequently
+   returns nothing when deployed, even though it works fine from a home
+   network.
+2. DuckDuckGo autocomplete - real search-suggestion data, no API key,
+   and (unlike Trends) has been reliable from cloud IPs in testing. This
+   is the primary source; Trends is a bonus when it isn't blocked.
+
+Neither gives exact search volume (that needs a paid tool or a Google Ads
+Keyword Planner account) but together they're a solid free signal.
 """
 import logging
 import time
 
+import requests
 from pytrends.request import TrendReq
 
 logger = logging.getLogger(__name__)
 
+AUTOCOMPLETE_URL = "https://duckduckgo.com/ac/"
 
-def _related_queries_with_retry(pytrends: TrendReq, topic: str, geo: str, attempts: int = 3) -> dict:
+
+def _autocomplete_keywords(topic: str) -> list[dict]:
+    try:
+        resp = requests.get(AUTOCOMPLETE_URL, params={"q": topic, "type": "list"}, timeout=10)
+        resp.raise_for_status()
+        _, suggestions = resp.json()
+    except Exception as e:
+        logger.warning("DuckDuckGo autocomplete failed for topic %r: %s", topic, e)
+        return []
+
+    results = []
+    for i, suggestion in enumerate(suggestions):
+        kw = suggestion.strip().lower()
+        if kw and kw != topic.lower():
+            results.append(
+                {"keyword": kw, "source": "duckduckgo_autocomplete", "signal": len(suggestions) - i}
+            )
+    return results
+
+
+def _related_queries_with_retry(pytrends: TrendReq, topic: str, geo: str, attempts: int = 2) -> dict:
     """pytrends occasionally 429s / returns empty on the first call of a
-    session (Google Trends anti-bot quirk). Retrying once or twice usually
-    succeeds without needing any paid API.
+    session. Retrying once usually helps on residential networks; on
+    cloud IPs it's often blocked outright, so we don't retry aggressively
+    here since DuckDuckGo autocomplete is the reliable fallback anyway.
     """
     last_error = None
     for attempt in range(attempts):
@@ -27,7 +58,7 @@ def _related_queries_with_retry(pytrends: TrendReq, topic: str, geo: str, attemp
                 return topic_data
         except Exception as e:
             last_error = e
-        time.sleep(3 * (attempt + 1))
+        time.sleep(2 * (attempt + 1))
 
     if last_error:
         raise last_error
@@ -40,6 +71,10 @@ def research_keywords(seed_topics: list[str], geo: str = "IN") -> list[dict]:
     found: dict[str, dict] = {}
 
     for topic in seed_topics:
+        for kw_data in _autocomplete_keywords(topic):
+            if kw_data["keyword"] not in found:
+                found[kw_data["keyword"]] = kw_data
+
         try:
             topic_data = _related_queries_with_retry(pytrends, topic, geo)
 
@@ -56,7 +91,6 @@ def research_keywords(seed_topics: list[str], geo: str = "IN") -> list[dict]:
                             "signal": float(row.get("value", 0)),
                         }
         except Exception as e:
-            # still flaky after retries; skip this topic rather than crash the whole pipeline
             logger.warning("Google Trends lookup failed for topic %r: %s", topic, e)
             continue
 
