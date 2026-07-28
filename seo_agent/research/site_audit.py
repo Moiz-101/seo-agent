@@ -1,0 +1,78 @@
+"""Basic on-page + technical audit using free sources:
+- direct HTML fetch + BeautifulSoup for on-page elements
+- Google PageSpeed Insights API (free, needs a Google Cloud API key)
+"""
+import requests
+from bs4 import BeautifulSoup
+
+from config import PAGESPEED_API_KEY
+
+PAGESPEED_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+
+
+def audit_on_page(url: str) -> dict:
+    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (SEO-Agent)"})
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    title = soup.title.string.strip() if soup.title and soup.title.string else None
+    meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+    meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else None
+
+    h1s = [h.get_text(strip=True) for h in soup.find_all("h1")]
+    h2s = [h.get_text(strip=True) for h in soup.find_all("h2")]
+    images = soup.find_all("img")
+    images_missing_alt = [img.get("src", "") for img in images if not img.get("alt")]
+    word_count = len(soup.get_text(separator=" ", strip=True).split())
+
+    return {
+        "url": url,
+        "title": title,
+        "title_length": len(title) if title else 0,
+        "meta_description": meta_description,
+        "meta_description_length": len(meta_description) if meta_description else 0,
+        "h1_count": len(h1s),
+        "h1_tags": h1s,
+        "h2_tags": h2s,
+        "word_count": word_count,
+        "images_total": len(images),
+        "images_missing_alt": len(images_missing_alt),
+    }
+
+
+def audit_performance(url: str, strategy: str = "mobile") -> dict:
+    if not PAGESPEED_API_KEY:
+        return {"error": "PAGESPEED_API_KEY not set, skipping performance audit"}
+
+    params = {"url": url, "strategy": strategy, "key": PAGESPEED_API_KEY}
+    resp = requests.get(PAGESPEED_ENDPOINT, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    lighthouse = data.get("lighthouseResult", {})
+    categories = lighthouse.get("categories", {})
+    audits = lighthouse.get("audits", {})
+
+    return {
+        "performance_score": categories.get("performance", {}).get("score"),
+        "seo_score": categories.get("seo", {}).get("score"),
+        "accessibility_score": categories.get("accessibility", {}).get("score"),
+        "largest_contentful_paint": audits.get("largest-contentful-paint", {}).get("displayValue"),
+        "cumulative_layout_shift": audits.get("cumulative-layout-shift", {}).get("displayValue"),
+        "total_blocking_time": audits.get("total-blocking-time", {}).get("displayValue"),
+    }
+
+
+def full_audit(url: str) -> dict:
+    result = {"on_page": None, "performance": None, "error": None}
+    try:
+        result["on_page"] = audit_on_page(url)
+    except Exception as e:
+        result["error"] = f"on_page audit failed: {e}"
+
+    try:
+        result["performance"] = audit_performance(url)
+    except Exception as e:
+        result["performance"] = {"error": str(e)}
+
+    return result
