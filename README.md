@@ -20,7 +20,7 @@ ke saath sync rehna, aakhir mein ongoing rank monitoring jab tak "/stop" na bolo
 | Gemini API key (content likhne ke liye) | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | 2 min |
 | PageSpeed Insights API key (site speed audit) | [Google Cloud Console](https://console.cloud.google.com/apis/library/pagespeedonline.googleapis.com) -> Enable API -> Credentials -> Create API key | 5 min |
 | Search Console access (rank tracking) | Google Cloud Console -> Service Account bana kar JSON key download karo, phir uska email Search Console property mein "Full user" add karo | 10 min |
-| Open PageRank API key (authority score) | [openpagerank.com](https://www.openpagerank.com/) -> sign up -> "API Access" | 2 min |
+| Open PageRank API key (authority score) | [openpagerank.keywordseverywhere.com/dashboard](https://openpagerank.keywordseverywhere.com/dashboard) -> free Keywords Everywhere account bana kar sign in -> dashboard se OpenPageRank key generate karo | 3 min |
 
 Koi bhi in mein se paid nahi hai. Gemini aur PageSpeed dono free-tier quota ke
 saath free hain (bohot zyada daily requests karoge tabhi limit lagegi).
