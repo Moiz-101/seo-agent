@@ -1,8 +1,13 @@
 """Telegram entrypoint for the SEO agent.
 
 Flow per website:
-  /newsite <url> | <topic1, topic2, ...>
-      -> runs research, generates first article, sends .docx on Telegram
+  /newsite <url>
+      -> crawls the whole site, runs a technical/on-page/speed/authority
+         audit, and sends an agency-style PDF report. Does NOT create any
+         content or make changes - it only looks.
+  "scratch start" (once you've reviewed the audit PDF)
+      -> begins optimizing the site's *existing* pages (Phase B - not yet
+         wired up in this build).
   "sent" (reply after receiving a doc)
       -> marks it as handed to the developer, bot now waits
   "go ahead" (once the developer has published the update live)
@@ -39,8 +44,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Aapki Telegram User ID: {update.effective_user.id}")
     await update.message.reply_text(
         "SEO Agent ready.\n\n"
-        "Naya site shuru karne ke liye:\n"
-        "/newsite <url> | <seed topic 1, seed topic 2>\n\n"
+        "Naya site audit karne ke liye:\n"
+        "/newsite <url>\n\n"
+        "Audit PDF milne ke baad, jab shuru karna ho to reply karo: Scratch Start\n"
         "Doc developer ko de diya? Reply karo: sent\n"
         "Developer ne live update kar diya? Reply karo: go ahead\n"
         "/status - current progress dekhne ke liye\n"
@@ -51,30 +57,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def newsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _authorized(update):
         return
-    text = " ".join(context.args)
-    if "|" not in text:
-        await update.message.reply_text("Format: /newsite https://example.com | topic one, topic two")
+    if not context.args:
+        await update.message.reply_text("Format: /newsite https://example.com")
         return
+    url = " ".join(context.args).strip()
 
-    url_part, topics_part = text.split("|", 1)
-    url = url_part.strip()
-    seed_topics = [t.strip() for t in topics_part.split(",") if t.strip()]
-
-    await update.message.reply_text(f"Research shuru kar raha hoon: {url} ...")
+    await update.message.reply_text(f"Poori site audit kar raha hoon: {url} ...\n(bade sites mein kuch minute lag sakte hain)")
     try:
-        site = await asyncio.to_thread(pipeline.start_new_site, url, seed_topics)
+        result = await asyncio.to_thread(pipeline.start_new_site, url)
     except Exception as e:
-        logger.exception("Research failed for %s", url)
-        await update.message.reply_text(f"Research karte waqt error aaya: {e}")
+        logger.exception("Audit failed for %s", url)
+        await update.message.reply_text(f"Audit karte waqt error aaya: {e}")
         return
 
-    await update.message.reply_text(
-        f"Research complete.\nKeywords found: {len(site['keywords'])}\n"
-        f"Competitors: {', '.join(site['competitors']) or 'none found'}\n"
-        f"Content pieces planned: {len(site['content_queue'])}\n\nPehla article likh raha hoon..."
+    site, pdf_path = result["site"], result["pdf_path"]
+    stats = site.get("crawl_stats", {})
+    await update.message.reply_document(
+        document=open(pdf_path, "rb"),
+        caption=(
+            f"Audit complete: {stats.get('total_pages_crawled', 0)} pages crawled.\n\n"
+            "Report review karo. Shuru karne ke liye reply karo: Scratch Start"
+        ),
     )
-
-    await _generate_and_send_next(update, context, url)
 
 
 async def _generate_and_send_next(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
@@ -107,6 +111,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     url = active_site["url"]
+
+    if text == "scratch start":
+        if active_site["stage"] != "AUDIT_READY":
+            await update.message.reply_text(
+                f"'{url}' abhi '{active_site['stage']}' stage mein hai, audit poora hone ka wait karo pehle."
+            )
+            return
+        await update.message.reply_text(
+            "Scratch Start receive ho gaya. Existing-page content polish/rewrite phase abhi "
+            "banaya nahi gaya hai is build mein - wo agla step hai jo jaldi add hoga."
+        )
+        return
 
     if text in ("sent", "sent to dev", "developer ko de diya"):
         pipeline.mark_sent_to_dev(url)

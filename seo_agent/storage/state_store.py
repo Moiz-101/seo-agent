@@ -42,7 +42,7 @@ def create_site(url: str) -> dict:
     data = _load_all()
     data[url] = {
         "url": url,
-        "stage": "RESEARCH",
+        "stage": "AUDITING",
         "keywords": [],
         "competitors": [],
         "content_queue": [],

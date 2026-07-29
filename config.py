@@ -12,6 +12,10 @@ PAGESPEED_API_KEY = os.getenv("PAGESPEED_API_KEY", "")
 GSC_SERVICE_ACCOUNT_FILE = os.getenv("GSC_SERVICE_ACCOUNT_FILE", "credentials/gsc_service_account.json")
 GSC_SITE_URL = os.getenv("GSC_SITE_URL", "")
 
+# Open PageRank (free, openpagerank.com) - used as a free proxy for
+# "Domain Authority", which is a paid/trademarked Moz metric.
+OPEN_PAGERANK_API_KEY = os.getenv("OPEN_PAGERANK_API_KEY", "")
+
 # Set on Render (or any cloud host) to run in webhook mode instead of polling.
 # e.g. https://your-app.onrender.com  (no trailing slash)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")

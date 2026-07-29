@@ -20,3 +20,5 @@ services:
         sync: false
       - key: WEBHOOK_URL
         sync: false
+      - key: OPEN_PAGERANK_API_KEY
+        sync: false

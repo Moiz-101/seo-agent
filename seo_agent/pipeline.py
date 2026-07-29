@@ -1,8 +1,13 @@
 """Per-website SEO pipeline state machine.
 
 Stages:
-  RESEARCH            -> gathering keywords/competitors/on-page audit
-  CONTENT_READY        -> a content doc has been generated and sent to Telegram,
+  AUDITING              -> crawling the site + running technical/on-page/speed/
+                          authority checks and building the audit PDF
+  AUDIT_READY            -> PDF sent on Telegram. Nothing else happens until the
+                          user says "Scratch Start" - the agent never invents new
+                          pages/topics on its own.
+  [Phase B, not yet wired] existing-page content polish/rewrite loop:
+  CONTENT_READY         -> a content doc has been generated and sent to Telegram,
                           waiting for the user to hand it to the developer
   AWAITING_DEV_UPDATE   -> user confirmed doc was sent; waiting for "go ahead"
                           (i.e. developer has published it on the live site)
@@ -12,43 +17,63 @@ Stages:
                           rankings until the user stops the site
   STOPPED               -> user said stop
 """
+from urllib.parse import urlparse
+
 from seo_agent.storage import state_store
-from seo_agent.research import keywords as kw_research
-from seo_agent.research import competitors as competitor_research
 from seo_agent.research import site_audit
+from seo_agent.research import site_crawler
+from seo_agent.research import authority as authority_research
+from seo_agent.research import screenshots as screenshot_capture
 from seo_agent.content import generator, docx_writer
+from seo_agent.reporting import pdf_report
 
 
-def start_new_site(url: str, seed_topics: list[str]) -> dict:
-    site = state_store.create_site(url)
-    return run_research(url, seed_topics)
+def start_new_site(url: str) -> dict:
+    state_store.create_site(url)
+    return run_audit(url)
 
 
-def run_research(url: str, seed_topics: list[str]) -> dict:
-    raw_keywords = kw_research.research_keywords(seed_topics)
-    clusters = kw_research.cluster_keywords(raw_keywords)
+def run_audit(url: str, max_pages: int = 200) -> dict:
+    """Crawls the whole site and builds the agency-style audit PDF. Does not
+    generate or plan any content - that only happens after "Scratch Start".
+    """
+    state_store.update_site(url, stage="AUDITING")
 
-    if not clusters:
-        # Google Trends is unreliable from some networks/cloud IPs and can return
-        # nothing at all. Fall back to the seed topics themselves so the pipeline
-        # still produces content instead of silently generating zero articles.
-        clusters = [[{"keyword": topic, "source": "seed_topic", "signal": 0}] for topic in seed_topics]
+    crawl = site_crawler.crawl_site(url, max_pages=max_pages)
+    domain = urlparse(url).netloc
+    authority_data = authority_research.get_authority_score(domain)
 
-    top_keywords = [k["keyword"] for k in raw_keywords[:10]] or seed_topics
-    competitors = competitor_research.top_competitors_for_keywords(top_keywords, url)
-
-    content_queue = [
-        generator.generate_content_brief(url, cluster) for cluster in clusters if cluster
+    sample_urls = [url] + [
+        p["url"] for p in crawl["pages"][1:6] if p.get("status_code") == 200 and p["url"] != url
     ]
+    performance_samples = []
+    for sample_url in sample_urls:
+        try:
+            perf = site_audit.audit_performance(sample_url)
+            perf["url"] = sample_url
+            performance_samples.append(perf)
+        except Exception:
+            continue
+
+    screenshot = screenshot_capture.capture_screenshot(url)
+    screenshots_list = [("Homepage", screenshot)] if screenshot else []
+
+    site_data = {
+        "url": url,
+        "crawl": crawl,
+        "authority": authority_data,
+        "performance_samples": performance_samples,
+        "screenshots": screenshots_list,
+    }
+    pdf_path = pdf_report.build_audit_pdf(site_data)
 
     site = state_store.update_site(
         url,
-        stage="RESEARCH_DONE",
-        keywords=raw_keywords,
-        competitors=competitors,
-        content_queue=content_queue,
+        stage="AUDIT_READY",
+        crawl_stats=crawl["stats"],
+        crawl_page_count=len(crawl["pages"]),
     )
-    return site
+    return {"site": site, "pdf_path": pdf_path}
 
 
 def generate_next_content_doc(url: str) -> tuple[dict, str] | None:

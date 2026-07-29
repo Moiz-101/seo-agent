@@ -10,19 +10,28 @@ from config import PAGESPEED_API_KEY
 PAGESPEED_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 
 
-def audit_on_page(url: str) -> dict:
-    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (SEO-Agent)"})
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+def parse_page(html: str, url: str) -> dict:
+    """Shared on-page parsing used by both the single-page audit and the
+    site-wide crawler (seo_agent/research/site_crawler.py).
+    """
+    soup = BeautifulSoup(html, "html.parser")
 
     title = soup.title.string.strip() if soup.title and soup.title.string else None
     meta_desc_tag = soup.find("meta", attrs={"name": "description"})
     meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else None
 
+    canonical_tag = soup.find("link", attrs={"rel": "canonical"})
+    canonical = canonical_tag["href"].strip() if canonical_tag and canonical_tag.get("href") else None
+
+    robots_tag = soup.find("meta", attrs={"name": "robots"})
+    robots_content = (robots_tag.get("content") or "").lower() if robots_tag else ""
+    indexable = "noindex" not in robots_content
+
     h1s = [h.get_text(strip=True) for h in soup.find_all("h1")]
     h2s = [h.get_text(strip=True) for h in soup.find_all("h2")]
     images = soup.find_all("img")
     images_missing_alt = [img.get("src", "") for img in images if not img.get("alt")]
+    links = soup.find_all("a", href=True)
     word_count = len(soup.get_text(separator=" ", strip=True).split())
 
     return {
@@ -31,13 +40,22 @@ def audit_on_page(url: str) -> dict:
         "title_length": len(title) if title else 0,
         "meta_description": meta_description,
         "meta_description_length": len(meta_description) if meta_description else 0,
+        "canonical": canonical,
+        "indexable": indexable,
         "h1_count": len(h1s),
         "h1_tags": h1s,
         "h2_tags": h2s,
         "word_count": word_count,
         "images_total": len(images),
         "images_missing_alt": len(images_missing_alt),
+        "links": [a["href"] for a in links],
     }
+
+
+def audit_on_page(url: str) -> dict:
+    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (SEO-Agent)"})
+    resp.raise_for_status()
+    return parse_page(resp.text, url)
 
 
 def audit_performance(url: str, strategy: str = "mobile") -> dict:

@@ -1,10 +1,15 @@
 # SEO Agent (Telegram-driven, free-tier tools)
 
-Telegram par website bhejo -> agent research karega (keywords + competitors),
-content likhega, Word doc bhejega. Aap "sent" bol kar developer ko de do; jab
-developer live update kar de, "go ahead" bol do -> agent technical SEO audit
-karega aur agla article bhejega. Content khatam hone ke baad agent Search
-Console se rankings monitor karta rehta hai, jab tak "/stop" na bolo.
+Telegram par website bhejo (`/newsite <url>`) -> agent **poori site crawl karke
+agency-style audit PDF** banata hai (screenshots, charts, scores) — koi bhi
+content ya changes tab tak nahi hote. Audit review karne ke baad **"Scratch
+Start"** bolo tab agent kaam shuru karta hai [is phase ka code abhi is build
+mein nahi hai — audit tak ban chuka hai, aage ka phase alag se aayega].
+
+Aage ka planned flow: existing pages ko polish/rewrite karna (naye pages khud
+se nahi banayega), on-page optimization, Search Console resubmission,
+technical/local/off-page SEO, aur "sent"/"go ahead" review loop se developer
+ke saath sync rehna, aakhir mein ongoing rank monitoring jab tak "/stop" na bolo.
 
 ## Kaunse tools/keys chahiye (sab free)
 
@@ -15,6 +20,7 @@ Console se rankings monitor karta rehta hai, jab tak "/stop" na bolo.
 | Gemini API key (content likhne ke liye) | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | 2 min |
 | PageSpeed Insights API key (site speed audit) | [Google Cloud Console](https://console.cloud.google.com/apis/library/pagespeedonline.googleapis.com) -> Enable API -> Credentials -> Create API key | 5 min |
 | Search Console access (rank tracking) | Google Cloud Console -> Service Account bana kar JSON key download karo, phir uska email Search Console property mein "Full user" add karo | 10 min |
+| Open PageRank API key (authority score) | [openpagerank.com](https://www.openpagerank.com/) -> sign up -> "API Access" | 2 min |
 
 Koi bhi in mein se paid nahi hai. Gemini aur PageSpeed dono free-tier quota ke
 saath free hain (bohot zyada daily requests karoge tabhi limit lagegi).
@@ -91,6 +97,7 @@ git push -u origin main
    - `PAGESPEED_API_KEY` (optional)
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
+   - `OPEN_PAGERANK_API_KEY` (optional, skip karne par authority score "not connected" dikhega)
 4. Deploy karo. Render ek URL dega, jaisे `https://seo-agent-bot.onrender.com`
 5. Ek aur env var add karo: `WEBHOOK_URL` = wahi URL (bina trailing slash ke), phir redeploy karo (auto-redeploy ho jayega env var change karne par)
 
@@ -104,7 +111,8 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 
 ## Telegram commands
 
-- `/newsite <url> | <seed topic 1, seed topic 2>` — research + pehla article shuru
+- `/newsite <url>` — poori site crawl + audit PDF (screenshots, charts, scores)
+- `Scratch Start` — audit review karne ke baad, optimization phase shuru karne ke liye (agla phase, abhi build ho raha hai)
 - `sent` — bolo jab doc developer ko de diya
 - `go ahead` — bolo jab developer ne live update kar diya (agla step trigger karta hai)
 - `/status` — sab tracked sites ka current stage
@@ -112,13 +120,22 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 
 ## Free-tier limitations (transparent rehna zaroori hai)
 
+- **"Authority Score"** Moz ki asli (paid, trademarked) Domain Authority nahi
+  hai — Open PageRank ka free proxy hai, report mein clearly labelled hai.
+- **"Keyword rankings"** sirf tab real hain jab us specific site ka Search
+  Console connect ho. Warna PDF mein "connect Search Console" note dikhega,
+  fake number nahi.
+- **Crawl** max 200 pages tak capped hai (Render free tier ke time/resource
+  budget ke liye) — bade sites ka partial audit hoga, report mein note hoga.
+- **Search Console "submission"** ka matlab sitemap resubmit + index-status
+  check hai (real, supported APIs) — Google arbitrary pages ko force-index
+  karne ka free API nahi deta, isliye wo claim nahi kiya jayega.
 - **Keyword volume**: exact search volume ke liye paid tools (Ahrefs/SEMrush)
-  chahiye. Yahan Google Trends (free) use ho raha hai jo relative interest +
-  related/rising queries deta hai — directionally sahi hai, exact numbers nahi.
+  chahiye. Yahan Google Trends + DuckDuckGo autocomplete (dono free) use ho
+  rahe hain jo directionally sahi hain, exact numbers nahi.
 - **Competitor/SERP data**: DuckDuckGo search results use ho rahe hain (free,
-  no API key) kyunki Google SERP scraping ToS violate karta hai aur paid SERP
-  APIs (SerpAPI/DataForSEO) ka free quota bohot chhota hai. Results Google
-  rankings se thoda alag ho sakte hain.
+  no API key) kyunki Google SERP scraping ToS violate karta hai. Results
+  Google rankings se thoda alag ho sakte hain.
 - **Backlink building**: fully automate nahi ho sakta free tools se — agent
   sirf opportunities suggest karega, outreach manual rahega.
 - **Ranking timeline**: koi bhi tool Google ranking guarantee nahi kar sakta.
@@ -135,13 +152,18 @@ seo_agent/
   pipeline.py                    stage orchestration per website
   storage/state_store.py          per-site state (Upstash Redis in cloud, local JSON fallback)
   research/
-    keywords.py                    Google Trends based keyword research
-    competitors.py                  DuckDuckGo based competitor discovery
-    site_audit.py                    on-page + PageSpeed audit
+    site_crawler.py                 full-site crawl (free Screaming Frog alternative)
+    authority.py                     Open PageRank authority score proxy
+    screenshots.py                   Microlink.io screenshot capture
+    keywords.py                     Google Trends + DuckDuckGo autocomplete keyword research
+    competitors.py                   DuckDuckGo based competitor discovery
+    site_audit.py                     on-page + PageSpeed audit (single page)
+  reporting/
+    pdf_report.py                    agency-style audit PDF (reportlab + matplotlib)
   content/
     generator.py                     Gemini article writer
     docx_writer.py                    markdown -> Word doc
   tracking/
     search_console.py                 GSC rank/traffic API
-data/                             generated docs + state (gitignored)
+data/                             generated docs + audit PDFs + state (gitignored)
 ```
