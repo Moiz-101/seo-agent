@@ -23,6 +23,14 @@ logger = logging.getLogger(__name__)
 AUTOCOMPLETE_URL = "https://duckduckgo.com/ac/"
 
 
+def autocomplete_only(topic: str) -> list[dict]:
+    """Fast, reliable keyword suggestions for a topic - skips Google Trends
+    entirely (used by the audit report, where we don't want to wait on
+    Trends' slow retries/429s just to fill a 'keyword opportunities' box).
+    """
+    return _autocomplete_keywords(topic)
+
+
 def _autocomplete_keywords(topic: str) -> list[dict]:
     try:
         resp = requests.get(AUTOCOMPLETE_URL, params={"q": topic, "type": "list"}, timeout=10)
