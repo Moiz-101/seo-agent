@@ -62,7 +62,12 @@ def audit_performance(url: str, strategy: str = "mobile") -> dict:
     if not PAGESPEED_API_KEY:
         return {"error": "PAGESPEED_API_KEY not set, skipping performance audit"}
 
-    params = {"url": url, "strategy": strategy, "key": PAGESPEED_API_KEY}
+    params = {
+        "url": url,
+        "strategy": strategy,
+        "key": PAGESPEED_API_KEY,
+        "category": ["PERFORMANCE", "SEO", "ACCESSIBILITY"],
+    }
     resp = requests.get(PAGESPEED_ENDPOINT, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
