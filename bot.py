@@ -6,8 +6,8 @@ Flow per website:
          audit, and sends an agency-style PDF report. Does NOT create any
          content or make changes - it only looks.
   "scratch start" (once you've reviewed the audit PDF)
-      -> begins optimizing the site's *existing* pages (Phase B - not yet
-         wired up in this build).
+      -> queues the site's *existing* pages (worst issues first) for content
+         updates - never invents new pages/topics on its own.
   "sent" (reply after receiving a doc)
       -> marks it as handed to the developer, bot now waits
   "go ahead" (once the developer has published the update live)
@@ -97,7 +97,7 @@ async def _generate_and_send_next(update: Update, context: ContextTypes.DEFAULT_
     site, docx_path = result
     await update.message.reply_document(
         document=open(docx_path, "rb"),
-        caption=f"Article ready: {site['published_topics'][-1]}\n\nDeveloper ko de dena, phir 'sent' likh dena.",
+        caption=f"Content ready for: {site['published_topics'][-1]}\n\nDeveloper ko de dena, phir 'sent' likh dena.",
     )
 
 
@@ -118,10 +118,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 f"'{url}' abhi '{active_site['stage']}' stage mein hai, audit poora hone ka wait karo pehle."
             )
             return
+        await update.message.reply_text("Existing pages ka kaam shuru kar raha hoon (site dobara crawl kar raha hoon)...")
+        try:
+            site = await asyncio.to_thread(pipeline.start_scratch, url)
+        except Exception as e:
+            logger.exception("Scratch start failed for %s", url)
+            await update.message.reply_text(f"Scratch start karte waqt error aaya: {e}")
+            return
+
         await update.message.reply_text(
-            "Scratch Start receive ho gaya. Existing-page content polish/rewrite phase abhi "
-            "banaya nahi gaya hai is build mein - wo agla step hai jo jaldi add hoga."
+            f"{len(site['content_queue'])} pages queue mein hain (jo sabse zyada issues wale hain unhe pehle liya hai).\n"
+            "Pehle page ka content bana raha hoon..."
         )
+        await _generate_and_send_next(update, context, url)
         return
 
     if text in ("sent", "sent to dev", "developer ko de diya"):

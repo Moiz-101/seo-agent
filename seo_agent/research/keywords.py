@@ -13,6 +13,7 @@ Neither gives exact search volume (that needs a paid tool or a Google Ads
 Keyword Planner account) but together they're a solid free signal.
 """
 import logging
+import re
 import time
 
 import requests
@@ -43,10 +44,15 @@ def _autocomplete_keywords(topic: str) -> list[dict]:
     results = []
     for i, suggestion in enumerate(suggestions):
         kw = suggestion.strip().lower()
-        if kw and kw != topic.lower():
-            results.append(
-                {"keyword": kw, "source": "duckduckgo_autocomplete", "signal": len(suggestions) - i}
-            )
+        if not kw or kw == topic.lower():
+            continue
+        if re.search(r"\d{3,}", kw):
+            # DuckDuckGo's suggestions occasionally include noise like zip
+            # codes ("tucson 85719 acura repair") mixed in with genuine
+            # keyword phrases - a 3+ digit run is a reliable signal of that,
+            # since real long-tail SEO phrases essentially never contain one.
+            continue
+        results.append({"keyword": kw, "source": "duckduckgo_autocomplete", "signal": len(suggestions) - i})
     return results
 
 

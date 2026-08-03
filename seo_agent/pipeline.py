@@ -6,13 +6,14 @@ Stages:
   AUDIT_READY            -> PDF sent on Telegram. Nothing else happens until the
                           user says "Scratch Start" - the agent never invents new
                           pages/topics on its own.
-  [Phase B, not yet wired] existing-page content polish/rewrite loop:
+  SCRATCH_ACTIVE         -> existing pages queued for POLISH (has ranking signal)
+                          or REWRITE (no ranking signal yet); one page at a time
   CONTENT_READY         -> a content doc has been generated and sent to Telegram,
                           waiting for the user to hand it to the developer
   AWAITING_DEV_UPDATE   -> user confirmed doc was sent; waiting for "go ahead"
                           (i.e. developer has published it on the live site)
   TECHNICAL_SEO         -> after go-ahead, run on-page/technical audit on the
-                          now-updated page and produce a fix-it report
+                          specific page just updated and produce a fix-it report
   MONITORING            -> content queue exhausted; periodically checks GSC
                           rankings until the user stops the site
   STOPPED               -> user said stop
@@ -49,6 +50,29 @@ def _derive_topic(homepage_title: str | None, domain: str) -> str:
     segment = re.split(r"[|\-–—:]", homepage_title)[0].strip()
     words = segment.split()
     return " ".join(words[:6]) if words else domain
+
+
+def _derive_page_topic(page_url: str, title: str | None) -> str:
+    """Prefer the URL slug over the page's own <title> when deriving a
+    keyword-research topic for a single page. The pages this queue works on
+    are picked *because* they have weak/thin titles (e.g. "Repair &
+    Maintenance - bestgaragedubai.com"), and querying autocomplete with a
+    generic fragment like that returns irrelevant results (seen in testing:
+    it returned an Indian tax/HSN-code suggestion for a Dubai car garage).
+    The URL slug is usually still deliberately keyword-focused even when the
+    title tag is weak, e.g. /car-repair-maintenance-service-dubai.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    path = urlparse(page_url).path.strip("/")
+    slug = path.split("/")[-1] if path else ""
+    slug_words = re.sub(r"[-_]+", " ", slug).strip()
+
+    if len(slug_words.split()) >= 2:
+        return " ".join(slug_words.split()[:6])
+
+    return _derive_topic(title, slug_words or urlparse(page_url).netloc)
 
 
 def run_audit(url: str, max_pages: int = 200) -> dict:
@@ -107,8 +131,50 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
     return {"site": site, "pdf_path": pdf_path}
 
 
+def start_scratch(url: str, max_pages_to_optimize: int = 15) -> dict:
+    """Builds the existing-page content queue after the user says "Scratch
+    Start". Only ever works on pages that already exist on the site - never
+    invents new pages/topics.
+
+    Every page defaults to REWRITE mode: real ranking data (needed to decide
+    a page already performs well enough to just POLISH) requires Search
+    Console to be connected for this specific site, which isn't wired up by
+    default. Pages with the most on-page issues are queued first since they
+    need the most work.
+    """
+    site = state_store.get_site(url)
+    if not site or site["stage"] != "AUDIT_READY":
+        current = site["stage"] if site else "not tracked"
+        raise ValueError(f"'{url}' must be in AUDIT_READY stage to start scratch (currently: {current})")
+
+    crawl = site_crawler.crawl_site(url, max_pages=200)
+    candidates = [p for p in crawl["pages"] if p.get("status_code") == 200 and p.get("indexable", True)]
+
+    def issue_score(p):
+        score = 0
+        if not p.get("title"):
+            score += 3
+        if not p.get("meta_description"):
+            score += 2
+        if p.get("h1_count") != 1:
+            score += 2
+        return score
+
+    candidates.sort(key=issue_score, reverse=True)
+    selected = candidates[:max_pages_to_optimize]
+
+    content_queue = [
+        {"url": p["url"], "mode": "REWRITE", "title": p.get("title"), "meta_description": p.get("meta_description")}
+        for p in selected
+    ]
+
+    return state_store.update_site(
+        url, stage="SCRATCH_ACTIVE", content_queue=content_queue, published_topics=[]
+    )
+
+
 def generate_next_content_doc(url: str) -> tuple[dict, str] | None:
-    """Pops the next content brief off the queue, generates the article,
+    """Pops the next page off the queue, generates its updated content,
     saves it as a .docx, returns (site, docx_path). Returns None if the
     queue is empty (site should move to MONITORING).
     """
@@ -117,18 +183,35 @@ def generate_next_content_doc(url: str) -> tuple[dict, str] | None:
     if not queue:
         return None
 
-    brief = queue[0]
-    article_md = generator.generate_article(
-        domain=brief["domain"],
-        primary_keyword=brief["primary_keyword"],
-        secondary_keywords=brief["secondary_keywords"],
+    item = queue[0]
+    page_url = item["url"]
+
+    try:
+        current = site_audit.audit_on_page(page_url)
+    except Exception:
+        current = {}
+
+    topic = _derive_page_topic(page_url, item.get("title") or current.get("title"))
+    keyword_ideas = kw_research.autocomplete_only(topic)
+    target_keyword = keyword_ideas[0]["keyword"] if keyword_ideas else topic
+
+    article_md = generator.generate_page_update(
+        page_url=page_url,
+        mode=item["mode"],
+        current_title=current.get("title") or item.get("title"),
+        current_meta=current.get("meta_description") or item.get("meta_description"),
+        target_keyword=target_keyword,
     )
-    docx_path = docx_writer.save_article_as_docx(article_md, brief["primary_keyword"])
+    docx_path = docx_writer.save_article_as_docx(article_md, target_keyword)
 
     remaining_queue = queue[1:]
-    published = site["published_topics"] + [brief["primary_keyword"]]
+    published = site["published_topics"] + [page_url]
     site = state_store.update_site(
-        url, stage="CONTENT_READY", content_queue=remaining_queue, published_topics=published
+        url,
+        stage="CONTENT_READY",
+        content_queue=remaining_queue,
+        published_topics=published,
+        current_page_url=page_url,
     )
     return site, docx_path
 
@@ -139,15 +222,17 @@ def mark_sent_to_dev(url: str) -> dict:
 
 def handle_go_ahead(url: str) -> dict:
     """Called when the user tells the bot the developer has published the
-    update. Runs a technical/on-page audit of the live site and produces a
-    report doc, then either queues the next content piece or moves to
-    monitoring if the queue is empty.
+    update. Runs a technical/on-page audit of the *specific page* that was
+    just implemented (not just the site's homepage) and produces a report
+    doc, then either queues the next content piece or moves to monitoring
+    if the queue is empty.
     """
-    audit = site_audit.full_audit(url)
-    report_md = _build_audit_report_md(url, audit)
+    site = state_store.get_site(url)
+    audit_target = site.get("current_page_url") or url
+    audit = site_audit.full_audit(audit_target)
+    report_md = _build_audit_report_md(audit_target, audit)
     report_path = docx_writer.markdown_to_docx(report_md, "technical-seo-report.docx")
 
-    site = state_store.get_site(url)
     if site["content_queue"]:
         state_store.update_site(url, stage="TECHNICAL_SEO_DONE")
     else:
