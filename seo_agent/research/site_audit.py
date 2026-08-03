@@ -29,9 +29,33 @@ def parse_page(html: str, url: str) -> dict:
 
     h1s = [h.get_text(strip=True) for h in soup.find_all("h1")]
     h2s = [h.get_text(strip=True) for h in soup.find_all("h2")]
+
     images = soup.find_all("img")
-    images_missing_alt = [img.get("src", "") for img in images if not img.get("alt")]
+    LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-lazy")
+
+    def _real_src(img):
+        src = img.get("src", "")
+        if src.startswith("data:"):
+            for attr in LAZY_SRC_ATTRS:
+                lazy_src = img.get(attr)
+                if lazy_src:
+                    return lazy_src
+        return src
+
+    images_detailed = [
+        {
+            "src": _real_src(img),
+            "alt": img.get("alt"),
+            "has_dimensions": bool(img.get("width") and img.get("height")),
+        }
+        for img in images
+    ]
+    images_missing_alt_list = [i for i in images_detailed if not i["alt"]]
+
     links = soup.find_all("a", href=True)
+    links_detailed = [{"href": a["href"], "text": a.get_text(strip=True)} for a in links]
+
+    schema_present = bool(soup.find("script", attrs={"type": "application/ld+json"}))
     word_count = len(soup.get_text(separator=" ", strip=True).split())
 
     return {
@@ -47,8 +71,14 @@ def parse_page(html: str, url: str) -> dict:
         "h2_tags": h2s,
         "word_count": word_count,
         "images_total": len(images),
-        "images_missing_alt": len(images_missing_alt),
-        "links": [a["href"] for a in links],
+        "images_missing_alt": len(images_missing_alt_list),
+        "images_missing_alt_list": images_missing_alt_list,
+        "images_detailed": images_detailed,
+        "images_missing_dimensions": sum(1 for i in images_detailed if not i["has_dimensions"]),
+        "schema_present": schema_present,
+        "links": [l["href"] for l in links_detailed],
+        "links_detailed": links_detailed,
+        "internal_link_count": None,  # filled in by the crawler, which knows the site's domain
     }
 
 

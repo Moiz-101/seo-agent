@@ -109,7 +109,15 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
     homepage = crawl["pages"][0] if crawl["pages"] else {}
     topic = _derive_topic(homepage.get("title"), domain)
     keyword_ideas = kw_research.autocomplete_only(topic)
-    competitors = competitor_research.find_competitors(topic, domain, max_results=8)
+
+    competitor_seed_keywords = [topic] + [k["keyword"] for k in keyword_ideas[:4]]
+    competitors = competitor_research.find_competitors_classified(competitor_seed_keywords, domain)
+
+    technical_checks = site_crawler.check_robots_and_sitemap(url)
+    broken_links_report = site_crawler.build_broken_links_report(crawl["pages"], url)
+    image_alt_findings = site_crawler.build_image_alt_report(crawl["pages"])
+    duplicate_titles = site_crawler.find_duplicate_groups(crawl["pages"], "title")
+    duplicate_metas = site_crawler.find_duplicate_groups(crawl["pages"], "meta_description")
 
     site_data = {
         "url": url,
@@ -119,6 +127,11 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
         "screenshots": screenshots_list,
         "keyword_ideas": keyword_ideas,
         "competitors": competitors,
+        "technical_checks": technical_checks,
+        "broken_links_report": broken_links_report,
+        "image_alt_findings": image_alt_findings,
+        "duplicate_titles": duplicate_titles,
+        "duplicate_metas": duplicate_metas,
     }
     pdf_path = pdf_report.build_audit_pdf(site_data)
 
