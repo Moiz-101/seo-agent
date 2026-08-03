@@ -111,10 +111,13 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 
 ## Telegram commands
 
-- `/newsite <url>` — poori site crawl + audit PDF (screenshots, charts, scores)
-- `Scratch Start` — audit review karne ke baad; existing pages (sabse zyada issues wale pehle) content-update ke liye queue ho jate hain, naye pages kabhi invent nahi karta
+- `/newsite <url>` — poori site crawl + audit PDF (screenshots, charts, scores, broken links, page-by-page appendix)
+- Audit PDF ke saath **buttons** milte hain (ya wahi text likh sakte ho): `Approve Audit`, `Request Revision`, `Scratch Start`, `Pause`
+  - `Scratch Start` — existing pages (sabse zyada issues wale pehle) content-update ke liye queue ho jate hain, naye pages kabhi invent nahi karta
+  - `Request Revision` — agla message jo bhejoge wo revision note ke roop mein save ho jayega
+  - `Pause` / `resume` — site ka kaam temporarily rok/shuru karo (`/stop` permanent hai, ye nahi)
 - `sent` — bolo jab doc developer ko de diya
-- `go ahead` — bolo jab developer ne live update kar diya (agla step trigger karta hai)
+- `go ahead` — bolo jab developer ne live update kar diya (agla step trigger karta hai, us specific page ka audit karta hai jo abhi update hui)
 - `/status` — sab tracked sites ka current stage
 - `/stop <url>` — kisi site par kaam rokna
 
@@ -122,6 +125,13 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 
 - **"Authority Score"** Moz ki asli (paid, trademarked) Domain Authority nahi
   hai — Open PageRank ka free proxy hai, report mein clearly labelled hai.
+- **Broken-link checking** aur **competitor classification** free-tier speed
+  budget ke andar capped hain (external link checks ~50, competitors 5
+  keyword searches tak) — bade sites ka partial-but-honest coverage milega,
+  capped hone par report mein note dikhega.
+- **Competitor classification** (Direct/SERP/Directory/Informational) ek
+  heuristic hai (keyword-match frequency + known-directory list) — free
+  tools se ye Google ke asli SERP-overlap jitna precise nahi ho sakta.
 - **"Keyword rankings"** sirf tab real hain jab us specific site ka Search
   Console connect ho. Warna PDF mein "connect Search Console" note dikhega,
   fake number nahi.
