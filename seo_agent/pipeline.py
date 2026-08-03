@@ -28,7 +28,7 @@ from seo_agent.research import screenshots as screenshot_capture
 from seo_agent.research import keywords as kw_research
 from seo_agent.research import competitors as competitor_research
 from seo_agent.content import generator, docx_writer
-from seo_agent.reporting import pdf_report
+from seo_agent.reporting import pdf_report, xlsx_export, consistency_check
 
 
 def start_new_site(url: str) -> dict:
@@ -50,6 +50,20 @@ def _derive_topic(homepage_title: str | None, domain: str) -> str:
     segment = re.split(r"[|\-–—:]", homepage_title)[0].strip()
     words = segment.split()
     return " ".join(words[:6]) if words else domain
+
+
+def _derive_brand_name(homepage_title: str | None, domain: str) -> str:
+    """Opposite end of _derive_topic(): the brand name is usually the LAST
+    segment of a title like 'Car Repair & Maintenance in Dubai | Best
+    Garage Dubai' (i.e. "Best Garage Dubai"), used for own-brand keyword
+    detection and the competitor-verification prompt.
+    """
+    if not homepage_title:
+        return domain
+    import re
+
+    segments = re.split(r"[|\-–—:]", homepage_title)
+    return segments[-1].strip() if len(segments) > 1 else homepage_title.strip()
 
 
 def _derive_page_topic(page_url: str, title: str | None) -> str:
@@ -108,16 +122,27 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
 
     homepage = crawl["pages"][0] if crawl["pages"] else {}
     topic = _derive_topic(homepage.get("title"), domain)
+    brand_name = _derive_brand_name(homepage.get("title"), domain)
+    business_summary = f"{brand_name} - {homepage.get('title', '')}: {homepage.get('meta_description', '') or ''}".strip()
+
     keyword_ideas = kw_research.autocomplete_only(topic)
 
     competitor_seed_keywords = [topic] + [k["keyword"] for k in keyword_ideas[:4]]
     competitors = competitor_research.find_competitors_classified(competitor_seed_keywords, domain)
+    competitors = competitor_research.verify_direct_competitors(competitors, business_summary)
+
+    competitor_domains = [c["domain"] for c in competitors]
+    keyword_ideas = kw_research.classify_keywords(keyword_ideas, brand_name, competitor_domains, home_location=topic.split()[-1] if topic else None)
 
     technical_checks = site_crawler.check_robots_and_sitemap(url)
     broken_links_report = site_crawler.build_broken_links_report(crawl["pages"], url)
     image_alt_findings = site_crawler.build_image_alt_report(crawl["pages"])
+    image_alt_findings = site_crawler.generate_alt_text_suggestions(image_alt_findings)
     duplicate_titles = site_crawler.find_duplicate_groups(crawl["pages"], "title")
     duplicate_metas = site_crawler.find_duplicate_groups(crawl["pages"], "meta_description")
+    protocol_issues = site_crawler.find_protocol_issues(crawl["pages"])
+    redirects_report = site_crawler.build_redirects_report(crawl["pages"])
+    schema_report = site_crawler.aggregate_schema_report(crawl["pages"])
 
     site_data = {
         "url": url,
@@ -132,16 +157,23 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
         "image_alt_findings": image_alt_findings,
         "duplicate_titles": duplicate_titles,
         "duplicate_metas": duplicate_metas,
+        "protocol_issues": protocol_issues,
+        "redirects_report": redirects_report,
+        "schema_report": schema_report,
     }
     pdf_path = pdf_report.build_audit_pdf(site_data)
+    xlsx_paths = xlsx_export.build_xlsx_package(site_data)
+    consistency_issues = consistency_check.run_checks(site_data)
 
     site = state_store.update_site(
         url,
         stage="AUDIT_READY",
         crawl_stats=crawl["stats"],
         crawl_page_count=len(crawl["pages"]),
+        audit_consistency_passed=len(consistency_issues) == 0,
+        audit_consistency_issues=consistency_issues,
     )
-    return {"site": site, "pdf_path": pdf_path}
+    return {"site": site, "pdf_path": pdf_path, "xlsx_paths": xlsx_paths, "consistency_issues": consistency_issues}
 
 
 def start_scratch(url: str, max_pages_to_optimize: int = 15) -> dict:
@@ -159,6 +191,13 @@ def start_scratch(url: str, max_pages_to_optimize: int = 15) -> dict:
     if not site or site["stage"] != "AUDIT_READY":
         current = site["stage"] if site else "not tracked"
         raise ValueError(f"'{url}' must be in AUDIT_READY stage to start scratch (currently: {current})")
+
+    if not site.get("audit_consistency_passed", False):
+        issues = site.get("audit_consistency_issues") or ["unknown consistency failure"]
+        raise ValueError(
+            "The last audit did not pass its consistency checks, so Scratch Start is blocked until it's "
+            f"re-run and passes: {'; '.join(issues)}"
+        )
 
     crawl = site_crawler.crawl_site(url, max_pages=200)
     candidates = [p for p in crawl["pages"] if p.get("status_code") == 200 and p.get("indexable", True)]

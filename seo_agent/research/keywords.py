@@ -111,6 +111,55 @@ def research_keywords(seed_topics: list[str], geo: str = "IN") -> list[dict]:
     return sorted(found.values(), key=lambda k: k["signal"], reverse=True)
 
 
+INFORMATIONAL_WORDS = ("how ", "what ", "why ", "guide", "tips", " vs ", "difference", "meaning", "does ")
+COMMERCIAL_WORDS = ("best ", "top ", "near me", "price", "cost", "cheap", "affordable", "booking", "book ", "quote", "rate", "service", "repair", "hire", "buy ")
+BRAND_STOPWORDS = {"the", "a", "an", "in", "of", "dubai", "uae", "llc", "inc", "co", "com", "www", "and", "for"}
+
+
+def _brand_tokens(name: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    return {w for w in words if w not in BRAND_STOPWORDS and len(w) > 2}
+
+
+def classify_keywords(keyword_ideas: list[dict], own_brand_name: str, competitor_domains: list[str], home_location: str | None = None) -> list[dict]:
+    """Tags each keyword idea as own_branded / competitor_branded /
+    informational / commercial / local / relevant_non_branded. This is a
+    heuristic (token-overlap with the site's own brand name and with
+    competitor domain names, plus keyword-pattern matching) - there's no
+    free tool that does precise search-intent classification, so results
+    should be read as a useful first pass, not a certainty.
+    """
+    own_tokens = _brand_tokens(own_brand_name)
+    competitor_brand_map = {d: _brand_tokens(d.split(".")[0]) for d in competitor_domains}
+
+    classified = []
+    for k in keyword_ideas:
+        kw = k["keyword"]
+        kw_lower = kw.lower()
+        kw_tokens = set(re.findall(r"[a-z0-9]+", kw_lower))
+        category, competitor_match = "relevant_non_branded", None
+
+        if own_tokens and len(own_tokens & kw_tokens) >= min(2, len(own_tokens)):
+            category = "own_branded"
+        else:
+            for domain, tokens in competitor_brand_map.items():
+                if tokens and len(tokens & kw_tokens) >= min(2, len(tokens)):
+                    category, competitor_match = "competitor_branded", domain
+                    break
+
+        if category == "relevant_non_branded":
+            if any(w in kw_lower for w in INFORMATIONAL_WORDS):
+                category = "informational"
+            elif any(w in kw_lower for w in COMMERCIAL_WORDS):
+                category = "commercial"
+            elif home_location and home_location.lower() in kw_lower:
+                category = "local"
+
+        classified.append({**k, "category": category, "competitor_match": competitor_match})
+
+    return classified
+
+
 def cluster_keywords(keywords: list[dict], max_clusters: int = 8) -> list[list[dict]]:
     """Very simple clustering: group by shared significant word.
 

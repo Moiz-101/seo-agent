@@ -1,15 +1,15 @@
-"""Builds the agency-style audit PDF: cover, executive summary, score
-breakdown + data-confidence transparency, priority action items, technical
-SEO deep-dive, broken-link and image-alt evidence tables, competitor/keyword
-snapshot (classified), screenshots, full page-by-page appendix, methodology.
+"""Builds the agency-style audit PDF: cover, table of contents, executive
+summary, data-confidence transparency, priority action items, technical SEO
+deep-dive, evidence summaries (full detail lives in the companion XLSX
+package - see xlsx_export.py), classified keyword/competitor snapshot,
+screenshots, recommended action plan, methodology.
 
-Scoring is our own transparent composite (documented in the PDF itself so
-it's never mistaken for a licensed/industry-standard number like Moz's):
-Technical 30% + On-page 30% + Speed 25% + Authority 15%. Any component that
-has no data (e.g. no PageSpeed key, no Open PageRank key) is left out and
-the remaining weights are rescaled proportionally - the report always shows
-a completeness percentage and confidence level so a partial score is never
-mistaken for a full one.
+Scoring is our own transparent composite: Technical 30% + On-page 30% +
+Speed 25% + Authority 15%. It is always labelled PROVISIONAL - any missing
+component is excluded and the remaining weights rescaled, which can raise
+or lower the number depending on what's missing, so it is explicitly not
+presented as a complete SEO-health score. See Data Confidence for exactly
+what was and wasn't measured.
 """
 import io
 import os
@@ -55,6 +55,12 @@ SEVERITY_COLOR = {"High": RED, "Medium": AMBER, "Low": MID_GREY}
 SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
 COMPETITOR_CATEGORY_ORDER = ["Direct Business Competitor", "Organic SERP Competitor", "Directory/Aggregator", "Informational"]
+KEYWORD_CATEGORY_LABELS = {
+    "relevant_non_branded": "Relevant (non-branded)",
+    "informational": "Informational",
+    "commercial": "Commercial intent",
+    "local": "Local intent",
+}
 
 
 def _hex(color_obj) -> str:
@@ -71,10 +77,11 @@ def score_color(score):
     return RED
 
 
-def compute_scores(crawl_stats: dict, authority: dict, performance_samples: list[dict]) -> dict:
+def compute_scores(crawl_stats: dict, authority: dict, performance_samples: list[dict], broken_links_report: dict) -> dict:
     total = max(crawl_stats.get("total_pages_crawled", 0), 1)
 
-    technical_issues = crawl_stats.get("broken_links", 0) + crawl_stats.get("non_indexable_pages", 0)
+    unique_broken = broken_links_report.get("unique_internal_broken_urls", 0)
+    technical_issues = unique_broken + crawl_stats.get("non_indexable_pages", 0)
     technical = max(0.0, 100 * (1 - technical_issues / total))
 
     on_page_issue_slots = 4 * total  # title, meta, h1-missing, h1-multiple
@@ -136,19 +143,39 @@ def compute_data_confidence(authority: dict, performance_samples: list[dict]) ->
     }
 
 
-def _priority_issues(stats: dict, scores: dict, total_pages: int, duplicate_titles: list, duplicate_metas: list) -> list[dict]:
+def _build_issues(stats, scores, total_pages, duplicate_titles, duplicate_metas, broken_links_report, protocol_issues, schema_report) -> list[dict]:
+    """Every issue gets severity + owner + effort + expected impact +
+    verification method, so the same list can render both the concise
+    Priority Action Items table and the fuller Recommended Action Plan.
+    """
     issues = []
 
     def pct(n):
         return round(100 * n / max(total_pages, 1))
 
-    if stats.get("broken_links", 0) > 0:
-        n = stats["broken_links"]
+    unique_internal = broken_links_report.get("unique_internal_broken_urls", 0)
+    occurrences = broken_links_report.get("internal_broken_occurrences", 0)
+    affected = broken_links_report.get("affected_source_pages", 0)
+    if unique_internal:
         issues.append(
             {
-                "severity": "High" if pct(n) > 5 else "Medium",
-                "title": f"Fix {n} broken link{'s' if n != 1 else ''}",
-                "detail": "Broken links waste crawl budget, hurt user trust, and can pass errors on to Google. See the Broken Links table for exact URLs.",
+                "severity": "High" if pct(unique_internal) > 5 else "Medium",
+                "title": f"Fix {unique_internal} broken internal URL{'s' if unique_internal != 1 else ''} ({occurrences} link occurrences across {affected} pages)",
+                "detail": "Broken links waste crawl budget, hurt user trust, and can pass errors on to Google. Full list in broken-links.xlsx.",
+                "owner": "Developer", "effort": "Medium", "affected_pages": affected,
+                "impact": "Recovers crawl budget and lost link equity; improves user trust",
+                "verification": "Re-crawl and confirm the destinations resolve with a 200 status",
+            }
+        )
+    unique_external = broken_links_report.get("unique_external_unreachable_urls", 0)
+    if unique_external:
+        issues.append(
+            {
+                "severity": "Low", "title": f"Review {unique_external} external link(s) that were unreachable or returned an error",
+                "detail": "Some may be temporarily down or blocking automated checks rather than genuinely broken - see broken-links.xlsx for the failure reason on each.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": broken_links_report.get("affected_source_pages", 0),
+                "impact": "Keeps outbound references trustworthy",
+                "verification": "Manually open each link in a browser to confirm",
             }
         )
     if stats.get("pages_missing_h1", 0) > 0:
@@ -157,69 +184,94 @@ def _priority_issues(stats: dict, scores: dict, total_pages: int, duplicate_titl
             {
                 "severity": "High" if pct(n) > 20 else "Medium",
                 "title": f"Add an H1 heading to {n} page{'s' if n != 1 else ''} ({pct(n)}% of the site)",
-                "detail": "The H1 tells users and search engines what a page is about. Every indexable page should have exactly one clear, keyword-relevant H1.",
+                "detail": "The H1 tells users and search engines what a page is about.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "Clearer topical signal to search engines for affected pages",
+                "verification": "Re-crawl and confirm h1_count = 1 in page-audit.xlsx",
             }
         )
     if stats.get("pages_multiple_h1", 0) > 0:
         n = stats["pages_multiple_h1"]
         issues.append(
             {
-                "severity": "Medium",
-                "title": f"Reduce to a single H1 on {n} page{'s' if n != 1 else ''}",
-                "detail": "Multiple H1 tags dilute topical focus. Keep one H1 per page and use H2/H3 for subheadings.",
+                "severity": "Medium", "title": f"Reduce to a single H1 on {n} page{'s' if n != 1 else ''}",
+                "detail": "Multiple H1 tags dilute topical focus.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "Sharper topical focus per page", "verification": "Re-crawl and confirm h1_count = 1",
             }
         )
     if stats.get("pages_missing_meta", 0) > 0:
         n = stats["pages_missing_meta"]
         issues.append(
             {
-                "severity": "Medium",
-                "title": f"Write meta descriptions for {n} page{'s' if n != 1 else ''}",
-                "detail": "Without a meta description, Google auto-generates the search snippet - usually hurting click-through rate.",
+                "severity": "Medium", "title": f"Write meta descriptions for {n} page{'s' if n != 1 else ''}",
+                "detail": "Without one, Google auto-generates the search snippet - usually hurting click-through rate.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "Better-controlled, more compelling search snippets",
+                "verification": "Re-crawl and confirm meta_description is present",
             }
         )
     if duplicate_titles:
         n = sum(len(g["urls"]) for g in duplicate_titles)
         issues.append(
             {
-                "severity": "Medium",
-                "title": f"Fix {len(duplicate_titles)} duplicate title group{'s' if len(duplicate_titles) != 1 else ''} ({n} pages)",
-                "detail": "Duplicate titles make it harder for Google to know which page to rank for a query. Give each page a unique, specific title.",
+                "severity": "Medium", "title": f"Fix {len(duplicate_titles)} duplicate title group{'s' if len(duplicate_titles) != 1 else ''} ({n} pages)",
+                "detail": "Duplicate titles make it harder for Google to know which page to rank for a query.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "Reduces keyword cannibalisation risk", "verification": "Re-crawl and confirm titles are unique",
             }
         )
     if duplicate_metas:
         n = sum(len(g["urls"]) for g in duplicate_metas)
         issues.append(
             {
-                "severity": "Low",
-                "title": f"Fix {len(duplicate_metas)} duplicate meta description group{'s' if len(duplicate_metas) != 1 else ''} ({n} pages)",
-                "detail": "Duplicate meta descriptions waste an opportunity to differentiate each page's search snippet.",
+                "severity": "Low", "title": f"Fix {len(duplicate_metas)} duplicate meta description group{'s' if len(duplicate_metas) != 1 else ''} ({n} pages)",
+                "detail": "Wastes an opportunity to differentiate each page's search snippet.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "More distinct search snippets", "verification": "Re-crawl and confirm meta descriptions are unique",
+            }
+        )
+    protocol_dups = protocol_issues.get("protocol_duplicates", [])
+    if protocol_dups:
+        issues.append(
+            {
+                "severity": "High", "title": f"Fix {len(protocol_dups)} http/https duplicate-content page(s)",
+                "detail": "These pages serve identical content on both http:// and https:// with no redirect between them - a real duplicate-content/canonicalization issue, not just a duplicate title.",
+                "owner": "Developer", "effort": "Medium", "affected_pages": len(protocol_dups),
+                "impact": "Consolidates ranking signals onto a single canonical URL",
+                "verification": "Confirm the http:// version 301-redirects to https://",
             }
         )
     if stats.get("orphan_pages", 0) > 0:
         n = stats["orphan_pages"]
         issues.append(
             {
-                "severity": "Medium",
-                "title": f"Link to {n} orphan page{'s' if n != 1 else ''} from somewhere on the site",
-                "detail": "These pages were found (e.g. via sitemap) but have no internal links pointing to them, making them harder for both users and Google to discover.",
-            }
-        )
-    if stats.get("mixed_protocol_links", 0) > 0:
-        issues.append(
-            {
-                "severity": "Low",
-                "title": f"Fix {stats['mixed_protocol_links']} link(s) still pointing to http:// instead of https://",
-                "detail": "Mixed-protocol internal links can cause redirect hops and mixed-content warnings.",
+                "severity": "Medium", "title": f"Link to {n} orphan page{'s' if n != 1 else ''} from somewhere on the site",
+                "detail": "Found (e.g. via sitemap) but nothing links to them internally.",
+                "owner": "SEO Team", "effort": "Low", "affected_pages": n,
+                "impact": "Improves discoverability and crawl efficiency",
+                "verification": "Re-crawl and confirm incoming_internal_links > 0",
             }
         )
     if stats.get("images_missing_alt_total", 0) > 0:
         n = stats["images_missing_alt_total"]
         issues.append(
             {
-                "severity": "Low",
-                "title": f"Add alt text to {n} image{'s' if n != 1 else ''}",
-                "detail": "Alt text improves accessibility and gives search engines extra context for image search. See the Image Alt Text table.",
+                "severity": "Low", "title": f"Add alt text to images missing it ({n} occurrences sitewide)",
+                "detail": "See image-alt-audit.xlsx for deduplicated, AI-drafted suggestions per unique image.",
+                "owner": "Content Team", "effort": "Low", "affected_pages": n,
+                "impact": "Accessibility + extra image-search context",
+                "verification": "Re-crawl and confirm images_missing_alt = 0",
+            }
+        )
+    if schema_report.get("recommendations"):
+        issues.append(
+            {
+                "severity": "Low", "title": "Add missing structured data (schema.org)",
+                "detail": "; ".join(schema_report["recommendations"]),
+                "owner": "Developer", "effort": "Medium", "affected_pages": total_pages - schema_report.get("pages_with_schema", 0),
+                "impact": "Improves eligibility for rich search results",
+                "verification": "Re-crawl and confirm schema_present = true with valid JSON-LD",
             }
         )
     if scores.get("speed") is not None and scores["speed"] < 70:
@@ -227,56 +279,61 @@ def _priority_issues(stats: dict, scores: dict, total_pages: int, duplicate_titl
             {
                 "severity": "High" if scores["speed"] < 50 else "Medium",
                 "title": f"Improve page speed (avg. {scores['speed']}/100)",
-                "detail": "Slow pages hurt both search rankings and conversion rate - this is one of the highest-leverage fixes available.",
+                "detail": "Slow pages hurt both search rankings and conversion rate.",
+                "owner": "Developer", "effort": "High", "affected_pages": total_pages,
+                "impact": "Better rankings and lower bounce rate",
+                "verification": "Re-run PageSpeed Insights and confirm score improvement",
             }
         )
     if scores.get("authority") is None:
         issues.append(
             {
-                "severity": "Low",
-                "title": "Connect Open PageRank for an authority score",
-                "detail": "Authority data isn't available yet for this audit - connecting it gives a fuller picture next time.",
+                "severity": "Low", "title": "Connect Open PageRank for an authority score",
+                "detail": "Not connected for this audit.",
+                "owner": "SEO Team", "effort": "Low", "affected_pages": 0,
+                "impact": "More complete provisional score next audit",
+                "verification": "Confirm authority.available = true on next run",
             }
         )
 
+    for i in issues:
+        i.setdefault("status", "Not Started")
     issues.sort(key=lambda i: SEVERITY_RANK[i["severity"]])
     return issues
 
 
-def _generate_narrative(url: str, stats: dict, scores: dict, total_pages: int, confidence: dict) -> str:
+def _generate_narrative(url, stats, scores, total_pages, confidence, broken_links_report) -> str:
     parts = []
     overall = scores.get("overall")
     if overall is not None:
         tier = "strong" if overall >= 80 else "a moderate" if overall >= 50 else "a weak"
         parts.append(
             f"{url} was crawled across {total_pages} pages and scores a provisional {overall}/100 overall "
-            f"({confidence['completeness_pct']}% data completeness, {confidence['confidence'].lower()} confidence) - {tier} starting point."
+            f"({confidence['completeness_pct']}% data completeness, {confidence['confidence'].lower()} confidence) - {tier} starting point. "
+            "This is not a complete SEO-health score - see Data Confidence for exactly what was measured."
         )
     else:
         parts.append(f"{url} was crawled across {total_pages} pages.")
 
-    if stats.get("broken_links", 0) > 0:
-        parts.append(f"{stats['broken_links']} broken link(s) were found, which waste crawl budget and can hurt user trust.")
+    unique_broken = broken_links_report.get("unique_internal_broken_urls", 0)
+    if unique_broken:
+        occ = broken_links_report.get("internal_broken_occurrences", 0)
+        affected = broken_links_report.get("affected_source_pages", 0)
+        parts.append(f"{unique_broken} unique internal URL(s) are broken, linked to {occ} times from {affected} pages.")
     else:
-        parts.append("No broken links were found in the crawled pages.")
+        parts.append("No confirmed broken internal links were found.")
 
     if stats.get("pages_missing_h1", 0):
         pct = round(100 * stats["pages_missing_h1"] / max(total_pages, 1))
-        parts.append(
-            f"{stats['pages_missing_h1']} pages ({pct}% of the site) are missing an H1 heading, one of the clearest "
-            "on-page signals search engines use to understand page topics."
-        )
+        parts.append(f"{stats['pages_missing_h1']} pages ({pct}% of the site) are missing an H1 heading.")
 
     if stats.get("orphan_pages", 0):
         parts.append(f"{stats['orphan_pages']} page(s) appear to be orphaned (no internal links point to them).")
 
     if scores.get("speed") is not None:
-        if scores["speed"] >= 80:
-            parts.append(f"Page speed is healthy (avg. {scores['speed']}/100).")
-        else:
-            parts.append(f"Page speed needs attention (avg. {scores['speed']}/100) - this affects rankings and conversions.")
+        parts.append(f"Page speed {'is healthy' if scores['speed'] >= 80 else 'needs attention'} (avg. {scores['speed']}/100).")
     else:
-        parts.append("Page speed wasn't measured for this audit (PageSpeed Insights not connected).")
+        parts.append("Page speed wasn't measured (PageSpeed Insights not connected).")
 
     return " ".join(parts)
 
@@ -305,28 +362,19 @@ def _score_chart(scores: dict) -> io.BytesIO:
     return buf
 
 
-def _issues_chart(stats: dict) -> io.BytesIO:
-    issue_labels = {
-        "broken_links": "Broken links",
-        "pages_missing_meta": "Missing meta desc.",
-        "pages_missing_h1": "Missing H1",
-        "pages_multiple_h1": "Multiple H1",
-        "non_indexable_pages": "Non-indexable",
-        "orphan_pages": "Orphan pages",
-    }
-    labels = list(issue_labels.values())
-    values = [stats.get(k, 0) for k in issue_labels]
+def _issues_chart(stats: dict, broken_unique: int) -> io.BytesIO:
+    labels = ["Broken URLs\n(unique)", "Missing meta\ndesc.", "Missing H1", "Multiple H1", "Non-indexable", "Orphan pages"]
+    values = [broken_unique, stats.get("pages_missing_meta", 0), stats.get("pages_missing_h1", 0), stats.get("pages_multiple_h1", 0), stats.get("non_indexable_pages", 0), stats.get("orphan_pages", 0)]
     max_val = max(values)
 
     fig, ax = plt.subplots(figsize=(6.5, 3.5))
     ax.bar(labels, values, color="#dc2626")
-    ax.set_ylabel("Pages affected")
+    ax.set_ylabel("Pages / URLs affected")
     ax.set_title("Site Health Issues")
     ax.set_ylim(0, max(max_val, 1) * 1.2)
     ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
     if max_val == 0:
         ax.text(0.5, 0.5, "No issues detected on crawled pages", transform=ax.transAxes, ha="center", va="center", fontsize=11, color="#16a34a")
-    plt.xticks(rotation=30, ha="right")
     fig.tight_layout()
 
     buf = io.BytesIO()
@@ -348,10 +396,8 @@ def _footer(canvas, doc):
 
 
 class _BookmarkedDocTemplate(SimpleDocTemplate):
-    """Adds a PDF bookmarks/outline panel (most PDF viewers show this as a
-    sidebar) for every Heading2 section, so the report has real, clickable
-    section navigation - not just a manually-numbered table of contents.
-    """
+    """Adds a PDF bookmarks/outline panel for every numbered section, so
+    the report has real, clickable navigation."""
 
     def afterFlowable(self, flowable):
         if isinstance(flowable, Paragraph) and flowable.style.name == "Heading2":
@@ -367,8 +413,8 @@ def _simple_table(rows, col_widths, font_size=9, header=True):
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
         ("FONTSIZE", (0, 0), (-1, -1), font_size),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
     ]
     if header:
         style += [
@@ -381,10 +427,11 @@ def _simple_table(rows, col_widths, font_size=9, header=True):
 
 
 def build_audit_pdf(site_data: dict) -> str:
-    """site_data keys: url, crawl ({'pages':.., 'stats':..}), authority (dict),
-    performance_samples, screenshots, keyword_ideas, competitors (classified
-    list of {domain, category, keyword_matches}), technical_checks,
-    broken_links_report, image_alt_findings, duplicate_titles, duplicate_metas.
+    """site_data keys (see pipeline.run_audit): url, crawl, authority,
+    performance_samples, screenshots, keyword_ideas (classified), competitors
+    (classified + LLM-verified), technical_checks, broken_links_report,
+    image_alt_findings (deduplicated), duplicate_titles, duplicate_metas,
+    protocol_issues, redirects_report, schema_report.
     """
     url = site_data["url"]
     crawl_pages = site_data["crawl"]["pages"]
@@ -395,14 +442,17 @@ def build_audit_pdf(site_data: dict) -> str:
     keyword_ideas = site_data.get("keyword_ideas", [])
     competitors = site_data.get("competitors", [])
     technical_checks = site_data.get("technical_checks", {})
-    broken_links_report = site_data.get("broken_links_report", {"broken_links": [], "extra_checks_capped": False})
+    broken_links_report = site_data.get("broken_links_report", {})
     image_alt_findings = site_data.get("image_alt_findings", [])
     duplicate_titles = site_data.get("duplicate_titles", [])
     duplicate_metas = site_data.get("duplicate_metas", [])
+    protocol_issues = site_data.get("protocol_issues", {"protocol_duplicates": []})
+    schema_report = site_data.get("schema_report", {"pages_with_schema": 0, "pages_total": 0, "schema_types_found": {}, "pages_with_invalid_schema": [], "recommendations": []})
     total_pages = crawl_stats.get("total_pages_crawled", 0)
 
-    scores = compute_scores(crawl_stats, authority, performance_samples)
+    scores = compute_scores(crawl_stats, authority, performance_samples, broken_links_report)
     confidence = compute_data_confidence(authority, performance_samples)
+    issues = _build_issues(crawl_stats, scores, total_pages, duplicate_titles, duplicate_metas, broken_links_report, protocol_issues, schema_report)
 
     safe_name = "".join(c if c.isalnum() else "-" for c in url).strip("-")
     path = os.path.join(REPORTS_DIR, f"audit-{safe_name}.pdf")
@@ -410,66 +460,95 @@ def build_audit_pdf(site_data: dict) -> str:
     doc = _BookmarkedDocTemplate(path, pagesize=letter, topMargin=0.7 * inch, bottomMargin=0.7 * inch)
     styles = getSampleStyleSheet()
     h2 = styles["Heading2"]
-    body = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10, leading=15)
-    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=8, leading=11)
-    white_title = ParagraphStyle("WhiteTitle", parent=styles["Title"], textColor=colors.white, fontSize=24, alignment=0)
-    white_sub = ParagraphStyle("WhiteSub", parent=styles["BodyText"], textColor=colors.white, fontSize=11)
+    body = ParagraphStyle("Body", parent=styles["BodyText"], fontSize=10.5, leading=15.5)
+    small = ParagraphStyle("Small", parent=styles["BodyText"], fontSize=8.5, leading=12)
+    white_title = ParagraphStyle("WhiteTitle", parent=styles["Title"], textColor=colors.white, fontSize=26, alignment=0)
+    white_sub = ParagraphStyle("WhiteSub", parent=styles["BodyText"], textColor=colors.white, fontSize=11.5)
     card_value = ParagraphStyle("CardValue", parent=styles["Title"], fontSize=22, alignment=1, textColor=colors.white, spaceAfter=2)
-    card_label = ParagraphStyle("CardLabel", parent=styles["BodyText"], fontSize=8, alignment=1, textColor=colors.white)
+    card_label = ParagraphStyle("CardLabel", parent=styles["BodyText"], fontSize=8.5, alignment=1, textColor=colors.white)
+    toc_style = ParagraphStyle("Toc", parent=styles["BodyText"], fontSize=11, leading=20)
+
+    section_counter = [0]
+
+    def section(title: str) -> Paragraph:
+        section_counter[0] += 1
+        return Paragraph(f"{section_counter[0]}. {title}", h2)
 
     story = []
 
     # --- Cover banner ---
     banner = Table(
-        [[Paragraph("SEO AUDIT REPORT", white_title)], [Paragraph(url, white_sub)], [Paragraph(datetime.utcnow().strftime("%d %B %Y"), white_sub)]],
+        [
+            [Paragraph("SEO AUDIT REPORT", white_title)],
+            [Paragraph(url, white_sub)],
+            [Paragraph(datetime.utcnow().strftime("%d %B %Y"), white_sub)],
+            [Paragraph(f"Provisional Score: {scores['overall']}/100 &nbsp;&nbsp;|&nbsp;&nbsp; Data Completeness: {confidence['completeness_pct']}%" if scores["overall"] is not None else "Provisional Score: N/A", white_sub)],
+        ],
         colWidths=[6.9 * inch],
     )
     banner.setStyle(
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), NAVY),
-                ("TOPPADDING", (0, 0), (-1, 0), 22),
-                ("BOTTOMPADDING", (0, -1), (-1, -1), 22),
+                ("TOPPADDING", (0, 0), (-1, 0), 24),
+                ("BOTTOMPADDING", (0, -1), (-1, -1), 24),
                 ("LEFTPADDING", (0, 0), (-1, -1), 20),
-                ("TOPPADDING", (0, 1), (-1, 2), 2),
+                ("TOPPADDING", (0, 1), (-1, 3), 3),
             ]
         )
     )
     story.append(banner)
     story.append(Spacer(1, 20))
 
-    # --- Stat cards ---
     def card(label, value, bg):
         t = Table([[Paragraph(str(value), card_value)], [Paragraph(label, card_label)]], colWidths=[1.62 * inch])
         t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), bg), ("TOPPADDING", (0, 0), (-1, 0), 14), ("BOTTOMPADDING", (0, -1), (-1, -1), 12)]))
         return t
 
-    overall_display = f"{scores['overall']}/100" if scores["overall"] is not None else "N/A"
+    unique_broken = broken_links_report.get("unique_internal_broken_urls", 0)
     cards = Table(
         [
             [
-                card("Provisional Score", overall_display, score_color(scores["overall"])),
+                card("Provisional Score", f"{scores['overall']}/100" if scores["overall"] is not None else "N/A", score_color(scores["overall"])),
                 card("Pages Crawled", total_pages, BLUE),
                 card("Data Completeness", f"{confidence['completeness_pct']}%", score_color(confidence["completeness_pct"])),
-                card("Broken Links", crawl_stats.get("broken_links", 0), GREEN if crawl_stats.get("broken_links", 0) == 0 else RED),
+                card("Broken URLs (unique)", unique_broken, GREEN if unique_broken == 0 else RED),
             ]
         ],
         colWidths=[1.72 * inch] * 4,
-        spaceBefore=0,
     )
     cards.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3)]))
     story.append(cards)
-    story.append(Spacer(1, 24))
+    story.append(PageBreak())
 
-    # --- Executive summary ---
-    story.append(Paragraph("Executive Summary", h2))
-    story.append(Paragraph(_generate_narrative(url, crawl_stats, scores, total_pages, confidence), body))
+    # --- Table of contents ---
+    toc_entries = [
+        "1. Executive Summary", "2. Data Confidence", "3. Priority Action Items",
+        "4. Score Breakdown & Site Health", "5. Technical SEO Findings", "6. Broken Links",
+        "7. Image Alt Text", "8. Keyword Opportunities", "9. Competitor Snapshot",
+        "10. Screenshots", "11. Page-by-Page Summary", "12. Recommended Action Plan",
+        "13. Methodology & Attached Files",
+    ]
+    story.append(Paragraph("Table of Contents", h2))
+    for entry in toc_entries:
+        story.append(Paragraph(entry, toc_style))
+    story.append(PageBreak())
+
+    # --- 1. Executive summary ---
+    story.append(section("Executive Summary"))
+    story.append(Paragraph(_generate_narrative(url, crawl_stats, scores, total_pages, confidence, broken_links_report), body))
     story.append(Spacer(1, 16))
 
-    # --- Data confidence ---
-    story.append(Paragraph("Data Confidence", h2))
-    conf_lines = [f"<b>Confidence level: {confidence['confidence']}</b> ({confidence['completeness_pct']}% of possible data sources connected)"]
-    story.append(Paragraph(conf_lines[0], body))
+    # --- 2. Data confidence ---
+    story.append(section("Data Confidence"))
+    story.append(
+        Paragraph(
+            f"<b>Confidence level: {confidence['confidence']}</b> ({confidence['completeness_pct']}% of possible data sources connected). "
+            "<font color=\"#dc2626\"><b>The provisional score above is not a complete SEO-health score</b></font> - "
+            "it only reflects the sources listed below.",
+            body,
+        )
+    )
     story.append(Spacer(1, 4))
     story.append(Paragraph("<b>Verified sources used in this audit:</b>", body))
     for s in confidence["verified_sources"]:
@@ -480,29 +559,28 @@ def build_audit_pdf(site_data: dict) -> str:
         story.append(Paragraph(f"&bull; {m}", small))
     story.append(Spacer(1, 16))
 
-    # --- Priority action items ---
-    story.append(Paragraph("Priority Action Items", h2))
-    issues = _priority_issues(crawl_stats, scores, total_pages, duplicate_titles, duplicate_metas)
+    # --- 3. Priority action items ---
+    story.append(section("Priority Action Items"))
     if issues:
         rows = [["Priority", "Recommendation"]]
         for issue in issues:
             badge = Paragraph(f'<font color="{_hex(SEVERITY_COLOR[issue["severity"]])}"><b>{issue["severity"]}</b></font>', body)
             detail_cell = Paragraph(f"<b>{issue['title']}</b><br/>{issue['detail']}", body)
             rows.append([badge, detail_cell])
-        story.append(_simple_table(rows, [0.9 * inch, 5.3 * inch], font_size=9))
+        story.append(_simple_table(rows, [0.9 * inch, 5.3 * inch], font_size=9.5))
     else:
         story.append(Paragraph("No priority issues found - the site is in good technical/on-page health.", body))
     story.append(Spacer(1, 16))
 
-    # --- Charts ---
-    story.append(Paragraph("Score Breakdown & Site Health", h2))
+    # --- 4. Charts ---
+    story.append(section("Score Breakdown & Site Health"))
     story.append(Image(_score_chart(scores), width=6.3 * inch, height=2.9 * inch))
     story.append(Spacer(1, 8))
-    story.append(Image(_issues_chart(crawl_stats), width=6.3 * inch, height=3.4 * inch))
+    story.append(Image(_issues_chart(crawl_stats, unique_broken), width=6.3 * inch, height=3.4 * inch))
     story.append(Spacer(1, 16))
 
-    # --- Technical SEO deep-dive ---
-    story.append(Paragraph("Technical SEO Findings", h2))
+    # --- 5. Technical SEO deep-dive ---
+    story.append(section("Technical SEO Findings"))
     tech_rows = [
         ["Check", "Result"],
         ["robots.txt present", "Yes" if technical_checks.get("robots_txt_present") else "No"],
@@ -511,13 +589,15 @@ def build_audit_pdf(site_data: dict) -> str:
         ["URLs listed in sitemap.xml", str(technical_checks.get("sitemap_url_count", "N/A"))],
         ["Pages missing canonical tag", str(sum(1 for p in crawl_pages if p.get("status_code") == 200 and not p.get("canonical")))],
         ["Non-indexable pages (noindex)", str(crawl_stats.get("non_indexable_pages", 0))],
+        ["HTTP/HTTPS duplicate-content pages", str(len(protocol_issues.get("protocol_duplicates", [])))],
         ["Duplicate title groups", str(len(duplicate_titles))],
         ["Duplicate meta description groups", str(len(duplicate_metas))],
         ["Orphan pages (no internal links in)", str(crawl_stats.get("orphan_pages", 0))],
         ["Max crawl depth reached", str(crawl_stats.get("max_crawl_depth", 0))],
-        ["Pages with structured data (schema.org)", f"{total_pages - crawl_stats.get('pages_missing_schema', 0)} / {total_pages}"],
+        ["Pages with structured data (schema.org)", f"{schema_report.get('pages_with_schema', 0)} / {schema_report.get('pages_total', total_pages)}"],
+        ["Schema types found", ", ".join(schema_report.get("schema_types_found", {}).keys()) or "none"],
+        ["Pages with invalid/unparseable schema", str(len(schema_report.get("pages_with_invalid_schema", [])))],
         ["Images missing width/height (CLS risk)", str(crawl_stats.get("images_missing_dimensions_total", 0))],
-        ["Mixed http/https internal links", str(crawl_stats.get("mixed_protocol_links", 0))],
     ]
     valid_perf = [p for p in performance_samples if p.get("performance_score") is not None]
     if valid_perf:
@@ -530,88 +610,126 @@ def build_audit_pdf(site_data: dict) -> str:
         ]
     else:
         tech_rows.append(["Core Web Vitals / mobile performance", "Not measured (PageSpeed Insights not connected)"])
-
-    story.append(_simple_table(tech_rows, [3.8 * inch, 2.4 * inch], font_size=9))
+    story.append(_simple_table(tech_rows, [3.6 * inch, 2.6 * inch], font_size=9.5))
     story.append(Spacer(1, 12))
+
+    if protocol_issues.get("protocol_duplicates"):
+        pd_block = [Paragraph("HTTP/HTTPS Duplicate-Content Pages", styles["Heading3"])]
+        for d in protocol_issues["protocol_duplicates"][:5]:
+            pd_block.append(Paragraph(f"&bull; {d['http_url']} (serves 200 directly - not redirected) vs. {d['https_url']}", small))
+        story.append(KeepTogether(pd_block))
+        story.append(Spacer(1, 10))
 
     if duplicate_titles:
         dup_block = [Paragraph("Duplicate Titles (examples)", styles["Heading3"])]
-        for group in duplicate_titles[:5]:
-            dup_block.append(Paragraph(f"<b>“{group['value']}”</b> used on {len(group['urls'])} pages:", small))
-            for u in group["urls"][:5]:
-                dup_block.append(Paragraph(f"&bull; {u}", small))
+        for group in duplicate_titles[:4]:
+            dup_block.append(Paragraph(f"<b>“{group['value']}”</b> used on {len(group['urls'])} pages: " + ", ".join(group["urls"][:3]), small))
         story.append(KeepTogether(dup_block))
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 10))
 
     if crawl_stats.get("orphan_pages", 0) > 0:
-        orphan_urls = [p["url"] for p in crawl_pages if p.get("is_orphan")][:10]
+        orphan_urls = [p["url"] for p in crawl_pages if p.get("is_orphan")][:8]
         orphan_block = [Paragraph("Orphan Pages (examples)", styles["Heading3"])]
         for u in orphan_urls:
             orphan_block.append(Paragraph(f"&bull; {u}", small))
         story.append(KeepTogether(orphan_block))
-    story.append(Spacer(1, 16))
-
-    # --- Broken links table ---
-    story.append(Paragraph("Broken Links", h2))
-    broken = broken_links_report.get("broken_links", [])
-    if broken:
-        rows = [["Source Page", "Broken Destination", "Status", "Type", "Anchor Text", "Recommended Fix"]]
-        for b in broken[:40]:
-            rows.append(
-                [
-                    Paragraph(b["source_page"], small),
-                    Paragraph(b["destination"], small),
-                    str(b["status"]),
-                    b["type"],
-                    Paragraph(b["anchor_text"][:60], small),
-                    Paragraph(b["recommended_fix"], small),
-                ]
-            )
-        story.append(_simple_table(rows, [1.3 * inch, 1.3 * inch, 0.5 * inch, 0.55 * inch, 1.1 * inch, 1.45 * inch], font_size=7))
-        if broken_links_report.get("extra_checks_capped"):
-            story.append(Spacer(1, 4))
-            story.append(Paragraph("Link-checking was capped for audit speed - there may be more broken links beyond what's listed here.", small))
-    else:
-        story.append(Paragraph("No broken links found among the links checked.", body))
-    story.append(Spacer(1, 16))
-
-    # --- Image alt text table ---
-    story.append(Paragraph("Image Alt Text Findings", h2))
-    if image_alt_findings:
-        rows = [["Page URL", "Image URL", "Classification", "Priority", "Recommended Alt"]]
-        for i in image_alt_findings[:40]:
-            rows.append(
-                [
-                    Paragraph(i["page_url"], small),
-                    Paragraph(i["image_url"], small),
-                    i["classification"],
-                    i["priority"],
-                    Paragraph(i["recommended_alt"], small),
-                ]
-            )
-        story.append(_simple_table(rows, [1.5 * inch, 1.5 * inch, 0.8 * inch, 0.6 * inch, 1.8 * inch], font_size=7))
-    else:
-        story.append(Paragraph("No images missing alt text were found.", body))
     story.append(PageBreak())
 
-    # --- Keyword & competitor snapshot ---
-    kw_block = [Paragraph("Keyword Opportunities", h2)]
-    if keyword_ideas:
-        kw_block.append(Paragraph("<b>AI-derived seed keywords</b> — search volume and difficulty unavailable (no paid keyword tool connected):", body))
+    # --- 6. Broken links summary ---
+    story.append(section("Broken Links"))
+    confirmed = broken_links_report.get("confirmed_broken", [])
+    unverified = broken_links_report.get("unverified", [])
+    summary_rows = [
+        ["Metric", "Count"],
+        ["Unique internal broken URLs", str(broken_links_report.get("unique_internal_broken_urls", 0))],
+        ["Total internal broken-link occurrences", str(broken_links_report.get("internal_broken_occurrences", 0))],
+        ["Unique external unreachable URLs", str(broken_links_report.get("unique_external_unreachable_urls", 0))],
+        ["Pages affected (link to a broken/unreachable destination)", str(broken_links_report.get("affected_source_pages", 0))],
+        ["Unverified (timeout/DNS/SSL/likely bot-blocked)", str(len(unverified))],
+    ]
+    story.append(_simple_table(summary_rows, [4.2 * inch, 2.0 * inch], font_size=9.5))
+    story.append(Spacer(1, 10))
+
+    if confirmed:
+        seen_dest = set()
+        sample = []
+        for b in confirmed:
+            if b["destination"] not in seen_dest:
+                seen_dest.add(b["destination"])
+                sample.append(b)
+            if len(sample) >= 12:
+                break
+        rows = [["Source Page", "Broken Destination", "Status", "Suggested Redirect"]]
+        for b in sample:
+            rows.append([Paragraph(b["source_page"], small), Paragraph(b["destination"], small), str(b["status"]), Paragraph(b.get("suggested_redirect") or "-", small)])
+        story.append(Paragraph(f"Sample of {len(sample)} unique broken destinations (full {len(confirmed)}-row detail, including every source page, is in <b>broken-links.xlsx</b>):", body))
+        story.append(Spacer(1, 4))
+        story.append(_simple_table(rows, [1.7 * inch, 1.9 * inch, 0.6 * inch, 1.9 * inch], font_size=8))
+    else:
+        story.append(Paragraph("No confirmed broken links found among the links checked.", body))
+    if broken_links_report.get("extra_checks_capped"):
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("Link-checking was capped for audit speed - there may be more unchecked links beyond this sample.", small))
+    story.append(PageBreak())
+
+    # --- 7. Image alt text summary ---
+    story.append(section("Image Alt Text"))
+    meaningful = [f for f in image_alt_findings if f["classification"] == "Meaningful"]
+    decorative = [f for f in image_alt_findings if f["classification"] == "Decorative"]
+    total_occurrences = sum(f["occurrence_count"] for f in image_alt_findings)
+    img_summary_rows = [
+        ["Metric", "Count"],
+        ["Unique images missing alt text", str(len(image_alt_findings))],
+        ["Total occurrences across all pages", str(total_occurrences)],
+        ["Meaningful (content) images", str(len(meaningful))],
+        ["Decorative / sitewide-reused images (logos, icons)", str(len(decorative))],
+    ]
+    story.append(_simple_table(img_summary_rows, [4.2 * inch, 2.0 * inch], font_size=9.5))
+    story.append(Spacer(1, 10))
+    if meaningful:
+        rows = [["Image URL", "Occurrences", "AI-Suggested Alt"]]
+        for f in meaningful[:12]:
+            rows.append([Paragraph(f["image_url"], small), str(f["occurrence_count"]), Paragraph(f.get("recommended_alt") or "", small)])
+        story.append(Paragraph(f"Sample of {min(12, len(meaningful))} meaningful images (full detail in <b>image-alt-audit.xlsx</b>):", body))
+        story.append(Spacer(1, 4))
+        story.append(_simple_table(rows, [2.4 * inch, 0.9 * inch, 2.8 * inch], font_size=8))
+    else:
+        story.append(Paragraph("No meaningful (non-decorative) images are missing alt text.", body))
+    story.append(PageBreak())
+
+    # --- 8. Keyword opportunities ---
+    kw_block = [section("Keyword Opportunities")]
+    non_branded = [k for k in keyword_ideas if k.get("category") not in ("competitor_branded",)]
+    competitor_branded = [k for k in keyword_ideas if k.get("category") == "competitor_branded"]
+    if non_branded:
+        kw_block.append(Paragraph("<b>AI-derived seed keywords</b> - search volume and difficulty unavailable (no paid keyword tool connected). Competitor-branded terms are excluded below (shown separately) since they aren't your own organic targeting opportunities.", body))
         kw_block.append(Spacer(1, 6))
-        kw_rows = [["Keyword idea"]] + [[Paragraph(k["keyword"], body)] for k in keyword_ideas[:12]]
-        kw_block.append(_simple_table(kw_rows, [6.2 * inch], font_size=9))
+        kw_rows = [["Keyword idea", "Category"]] + [
+            [Paragraph(k["keyword"], body), KEYWORD_CATEGORY_LABELS.get(k.get("category"), k.get("category", "own_branded").replace("_", " ").title())]
+            for k in non_branded[:15]
+        ]
+        kw_block.append(_simple_table(kw_rows, [4.4 * inch, 1.8 * inch], font_size=9.5))
     else:
         kw_block.append(Paragraph("No keyword suggestions could be generated for this site right now.", body))
     story.append(KeepTogether(kw_block))
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, 16))
 
-    comp_block = [Paragraph("Competitor Snapshot", h2)]
+    if competitor_branded:
+        cb_block = [Paragraph("Competitor-Branded Terms Found (excluded from your keyword list above)", styles["Heading3"])]
+        for k in competitor_branded[:8]:
+            cb_block.append(Paragraph(f"&bull; {k['keyword']} (matches: {k.get('competitor_match', '?')})", small))
+        story.append(KeepTogether(cb_block))
+    story.append(PageBreak())
+
+    # --- 9. Competitor snapshot ---
+    comp_block = [section("Competitor Snapshot")]
     if competitors:
         comp_block.append(
             Paragraph(
-                "Classified from free DuckDuckGo search results (approximate). Directories/aggregators and informational "
-                "sites are shown separately and are never treated as direct competitors.",
+                "Classified from free DuckDuckGo search results, with the top 'Direct Business Competitor' "
+                "candidates spot-checked by AI against their homepage content (downgraded if they look like a "
+                "directory, tool, or unrelated site the domain blocklist missed). Directories, aggregators, and "
+                "informational sites are never treated as direct competitors.",
                 body,
             )
         )
@@ -625,97 +743,89 @@ def build_audit_pdf(site_data: dict) -> str:
                 continue
             comp_block.append(Paragraph(f"<b>{category}</b> ({len(entries)})", styles["Heading3"]))
             for e in entries[:8]:
-                comp_block.append(Paragraph(f"&bull; {e['domain']}", small))
+                note = " (downgraded after AI review)" if e.get("verification_note") else ""
+                comp_block.append(Paragraph(f"&bull; {e['domain']}{note}", small))
     else:
         comp_block.append(Paragraph("No competitor data could be gathered for this site right now.", body))
     story.append(KeepTogether(comp_block))
     story.append(Spacer(1, 16))
 
-    # --- Screenshots ---
+    # --- 10. Screenshots ---
     if screenshots:
         for idx, (label, img_bytes) in enumerate(screenshots):
-            heading = [Paragraph("Screenshots", h2)] if idx == 0 else []
-            story.append(
-                KeepTogether(
-                    heading
-                    + [
-                        Paragraph(label, body),
-                        Image(io.BytesIO(img_bytes), width=6.0 * inch, height=3.7 * inch),
-                        Spacer(1, 14),
-                    ]
-                )
-            )
+            heading = [section("Screenshots")] if idx == 0 else []
+            story.append(KeepTogether(heading + [Paragraph(label, body), Image(io.BytesIO(img_bytes), width=6.0 * inch, height=3.7 * inch), Spacer(1, 14)]))
+    else:
+        story.append(section("Screenshots"))
+        story.append(Paragraph("No screenshots could be captured for this audit.", body))
     story.append(PageBreak())
 
-    # --- Page-by-page audit appendix ---
-    story.append(Paragraph("Page-by-Page Audit Appendix", h2))
-    story.append(Paragraph(f"Full evidence for all {total_pages} crawled pages.", body))
-    story.append(Spacer(1, 6))
-    appendix_rows = [["URL", "Status", "Idx", "Title (len)", "Meta", "H1", "Words", "Int.Links", "Alt Miss", "Canon", "Issues"]]
-    for p in crawl_pages:
-        status = p.get("status_code")
-        status_display = str(status) if status is not None else "unreachable"
-        if status != 200:
-            appendix_rows.append([Paragraph(p["url"], small), status_display, "-", "-", "-", "-", "-", "-", "-", "-", "fetch failed"])
-            continue
-
-        page_issues = []
-        if not p.get("title"):
-            page_issues.append("no title")
-        if not p.get("meta_description"):
-            page_issues.append("no meta")
-        if p.get("h1_count") == 0:
-            page_issues.append("no H1")
-        elif p.get("h1_count", 1) > 1:
-            page_issues.append("multi-H1")
-        if not p.get("canonical"):
-            page_issues.append("no canonical")
-        if p.get("is_orphan"):
-            page_issues.append("orphan")
-
-        appendix_rows.append(
-            [
-                Paragraph(p["url"], small),
-                status_display,
-                "Y" if p.get("indexable", True) else "N",
-                f"{p.get('title_length', 0)}",
-                "Y" if p.get("meta_description") else "N",
-                str(p.get("h1_count", 0)),
-                str(p.get("word_count", 0)),
-                str(p.get("internal_link_count", 0)),
-                str(p.get("images_missing_alt", 0)),
-                "Y" if p.get("canonical") else "N",
-                Paragraph(", ".join(page_issues) or "none", small),
-            ]
-        )
-    story.append(
-        _simple_table(
-            appendix_rows,
-            [1.7 * inch, 0.5 * inch, 0.3 * inch, 0.55 * inch, 0.4 * inch, 0.3 * inch, 0.45 * inch, 0.5 * inch, 0.45 * inch, 0.4 * inch, 1.0 * inch],
-            font_size=6.5,
-        )
-    )
-    if crawl_stats.get("crawl_capped"):
-        story.append(Spacer(1, 6))
-        story.append(Paragraph(f"This site has more than {total_pages} pages - the crawl was capped for audit speed. This appendix covers the crawled sample only.", small))
-
-    story.append(PageBreak())
-
-    # --- Methodology + next step ---
-    story.append(HRFlowable(width="100%", color=LIGHT_GREY))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("Methodology", h2))
+    # --- 11. Page-by-page summary ---
+    story.append(section("Page-by-Page Summary"))
     story.append(
         Paragraph(
-            "Overall Site Score = Technical 30% + On-Page 30% + Speed 25% + Authority 15%. It is always labelled "
-            "<b>provisional</b> because it only uses the data sources listed under Data Confidence above; any score "
-            "component without data is excluded and the remaining weights are rescaled rather than inflating the "
-            "final number. Authority uses Open PageRank as a free proxy for Domain Authority (not Moz's proprietary "
-            "metric). Keyword ideas are AI-derived from free autocomplete data, not real search volume/ranking "
-            "numbers, which require Search Console or a paid keyword tool.",
+            f"{total_pages} pages were crawled. Full per-page evidence (title, meta, H1, word count, links, images, "
+            "canonical, and every detected issue for each page) is in the attached <b>page-audit.xlsx</b> - kept out of "
+            "this PDF to keep it readable.",
             body,
         )
     )
+    story.append(Spacer(1, 10))
+    problem_pages = [p for p in crawl_pages if p.get("status_code") == 200 and (not p.get("title") or not p.get("meta_description") or p.get("h1_count") != 1)][:10]
+    if problem_pages:
+        rows = [["URL", "Key Issue"]]
+        for p in problem_pages:
+            i = []
+            if not p.get("title"):
+                i.append("no title")
+            if not p.get("meta_description"):
+                i.append("no meta")
+            if p.get("h1_count") != 1:
+                i.append("H1 issue")
+            rows.append([Paragraph(p["url"], small), ", ".join(i)])
+        story.append(Paragraph(f"Worst {len(problem_pages)} pages by on-page issue count:", body))
+        story.append(Spacer(1, 4))
+        story.append(_simple_table(rows, [4.4 * inch, 1.8 * inch], font_size=9))
+    if crawl_stats.get("crawl_capped"):
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(f"This site has more than {total_pages} pages - the crawl was capped for audit speed.", small))
+    story.append(PageBreak())
+
+    # --- 12. Recommended action plan ---
+    story.append(section("Recommended Action Plan"))
+    if issues:
+        rows = [["Issue", "Priority", "Pages", "Owner", "Effort", "Expected Impact", "Verification", "Status"]]
+        for i in issues:
+            rows.append(
+                [
+                    Paragraph(i["title"], small), i["severity"], str(i.get("affected_pages", "-")), i["owner"], i["effort"],
+                    Paragraph(i["impact"], small), Paragraph(i["verification"], small), i["status"],
+                ]
+            )
+        story.append(_simple_table(rows, [1.7 * inch, 0.55 * inch, 0.4 * inch, 0.65 * inch, 0.5 * inch, 1.3 * inch, 1.3 * inch, 0.6 * inch], font_size=7))
+    else:
+        story.append(Paragraph("No outstanding issues to plan for.", body))
+    story.append(PageBreak())
+
+    # --- 13. Methodology + attached files ---
+    story.append(HRFlowable(width="100%", color=LIGHT_GREY))
+    story.append(Spacer(1, 10))
+    story.append(section("Methodology & Attached Files"))
+    story.append(
+        Paragraph(
+            "Overall Site Score = Technical 30% + On-Page 30% + Speed 25% + Authority 15%, always labelled "
+            "<b>provisional</b>. When a component has no data, it is excluded and the remaining weights are "
+            "rescaled among the available components - this can raise <i>or</i> lower the resulting number "
+            "depending on which component is missing, so it is not presented as a complete SEO-health score. "
+            "See Data Confidence for the exact sources used. Authority uses Open PageRank as a free proxy for "
+            "Domain Authority (not Moz's proprietary metric). Structured-data checking validates that JSON-LD "
+            "parses correctly and extracts @type values - it is not a full schema.org spec validator. Competitor "
+            "and keyword classification use frequency heuristics plus an AI spot-check, not a paid SERP-overlap tool.",
+            body,
+        )
+    )
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("<b>Attached files:</b> broken-links.xlsx, image-alt-audit.xlsx, page-audit.xlsx, redirects.xlsx, metadata.xlsx", body))
     story.append(Spacer(1, 14))
     story.append(Paragraph("Next Step", h2))
     story.append(

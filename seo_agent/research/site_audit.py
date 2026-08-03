@@ -2,6 +2,8 @@
 - direct HTML fetch + BeautifulSoup for on-page elements
 - Google PageSpeed Insights API (free, needs a Google Cloud API key)
 """
+import json
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -55,7 +57,21 @@ def parse_page(html: str, url: str) -> dict:
     links = soup.find_all("a", href=True)
     links_detailed = [{"href": a["href"], "text": a.get_text(strip=True)} for a in links]
 
-    schema_present = bool(soup.find("script", attrs={"type": "application/ld+json"}))
+    schema_blocks = []
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        try:
+            data = json.loads(raw)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if isinstance(item, dict):
+                    schema_blocks.append({"type": item.get("@type", "Unknown"), "valid": True, "error": None})
+        except Exception as e:
+            schema_blocks.append({"type": None, "valid": False, "error": str(e)[:150]})
+
+    schema_present = len(schema_blocks) > 0
+    schema_types = [b["type"] for b in schema_blocks if b["valid"] and b["type"]]
+    schema_has_errors = any(not b["valid"] for b in schema_blocks)
     word_count = len(soup.get_text(separator=" ", strip=True).split())
 
     return {
@@ -76,6 +92,9 @@ def parse_page(html: str, url: str) -> dict:
         "images_detailed": images_detailed,
         "images_missing_dimensions": sum(1 for i in images_detailed if not i["has_dimensions"]),
         "schema_present": schema_present,
+        "schema_types": schema_types,
+        "schema_has_errors": schema_has_errors,
+        "schema_blocks": schema_blocks,
         "links": [l["href"] for l in links_detailed],
         "links_detailed": links_detailed,
         "internal_link_count": None,  # filled in by the crawler, which knows the site's domain

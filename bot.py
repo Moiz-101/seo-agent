@@ -23,6 +23,8 @@ Flow per website:
 """
 import asyncio
 import logging
+import os
+import zipfile
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -33,6 +35,15 @@ from seo_agent.storage import state_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _zip_xlsx_package(xlsx_paths: dict, url: str) -> str:
+    safe_name = "".join(c if c.isalnum() else "-" for c in url).strip("-")
+    zip_path = os.path.join(config.DATA_DIR, f"audit-data-{safe_name}.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in xlsx_paths.values():
+            zf.write(path, arcname=os.path.basename(path))
+    return zip_path
 
 
 def _authorized(update: Update) -> bool:
@@ -85,15 +96,27 @@ async def newsite(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Audit karte waqt error aaya: {e}")
         return
 
-    site, pdf_path = result["site"], result["pdf_path"]
+    site, pdf_path, xlsx_paths = result["site"], result["pdf_path"], result["xlsx_paths"]
     stats = site.get("crawl_stats", {})
+    consistency_note = ""
+    if not result["consistency_issues"]:
+        consistency_note = "\nConsistency checks: passed."
+    else:
+        consistency_note = f"\n⚠️ Consistency checks found {len(result['consistency_issues'])} issue(s) - Scratch Start is blocked until this is re-run and passes."
+
     await update.message.reply_document(
         document=open(pdf_path, "rb"),
         caption=(
-            f"Audit complete: {stats.get('total_pages_crawled', 0)} pages crawled.\n\n"
+            f"Audit complete: {stats.get('total_pages_crawled', 0)} pages crawled.{consistency_note}\n\n"
             "Report review karo aur neeche button dabao (ya text likho)."
         ),
         reply_markup=_audit_keyboard(),
+    )
+
+    zip_path = _zip_xlsx_package(xlsx_paths, url)
+    await update.message.reply_document(
+        document=open(zip_path, "rb"),
+        caption="Full evidence spreadsheets (broken links, image alt text, page-by-page audit, redirects, metadata).",
     )
 
 
