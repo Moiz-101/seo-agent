@@ -96,7 +96,12 @@ def run_audit(url: str, max_pages: int = 200) -> dict:
     state_store.update_site(url, stage="AUDITING")
 
     crawl = site_crawler.crawl_site(url, max_pages=max_pages)
-    domain = urlparse(url).netloc
+    # crawl_site resolves redirects (e.g. bare domain -> www subdomain) before
+    # crawling, so the first crawled page reflects where the site actually
+    # lives - use that for the domain rather than the possibly-unresolved
+    # input url, so authority/competitor lookups target the real domain.
+    resolved_homepage_url = crawl["pages"][0]["url"] if crawl["pages"] else url
+    domain = urlparse(resolved_homepage_url).netloc
     authority_data = authority_research.get_authority_score(domain)
 
     other_pages = [p for p in crawl["pages"][1:] if p.get("status_code") == 200 and p["url"] != url]

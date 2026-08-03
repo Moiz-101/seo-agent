@@ -83,6 +83,18 @@ def crawl_site(base_url: str, max_pages: int = 200) -> dict:
     """Returns {'pages': [...], 'stats': {...}}. Best-effort per page: a
     failed fetch is recorded with its error rather than aborting the crawl.
     """
+    # Resolve the real site origin first (e.g. bare domain -> www subdomain,
+    # or http -> https) so same-domain checks match where the site actually
+    # lives, not the URL the user happened to type. Without this, a site
+    # that redirects example.com -> www.example.com has every discovered
+    # link (all on www.) wrongly rejected as "external" and the crawl stops
+    # after just the homepage.
+    try:
+        resolve_resp = requests.head(base_url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}, allow_redirects=True)
+        base_url = resolve_resp.url
+    except Exception:
+        pass  # fall back to the original URL - the main fetch loop below will still report any real error
+
     netloc = urlparse(base_url).netloc
     base_scheme = urlparse(base_url).scheme
     robot_parser = _get_robot_parser(base_url)
