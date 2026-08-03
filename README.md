@@ -112,7 +112,7 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 ## Telegram commands
 
 - `/newsite <url>` — poori site crawl + audit PDF (screenshots, charts, scores)
-- `Scratch Start` — audit review karne ke baad, optimization phase shuru karne ke liye (agla phase, abhi build ho raha hai)
+- `Scratch Start` — audit review karne ke baad; existing pages (sabse zyada issues wale pehle) content-update ke liye queue ho jate hain, naye pages kabhi invent nahi karta
 - `sent` — bolo jab doc developer ko de diya
 - `go ahead` — bolo jab developer ne live update kar diya (agla step trigger karta hai)
 - `/status` — sab tracked sites ka current stage
