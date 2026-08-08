@@ -17,8 +17,12 @@ Flow per website:
   "sent" (reply after receiving a doc)
       -> marks it as handed to the developer, bot now waits
   "go ahead" (once the developer has published the update live)
-      -> re-crawls the live page and compares it against what was proposed
-         (title/meta), runs a technical/on-page audit, sends a report, then
+      -> re-crawls the live page and checks for real evidence the update is
+         actually live (title/meta match, or the flagged flaws being fixed).
+         If there's no evidence at all, it does NOT proceed silently - it
+         sends a clear warning instead. Reply "confirm" to force through
+         anyway, or fix it live and say "go ahead" again.
+      -> once verified, runs a technical/on-page audit, sends a report, then
          generates + sends the next article in the queue (loop)
   /status
       -> shows current stage of the active site
@@ -174,6 +178,48 @@ async def _start_scratch(reply_target, context: ContextTypes.DEFAULT_TYPE, url: 
     await _generate_and_send_next(reply_target, context, url)
 
 
+async def _run_go_ahead(reply_target, context: ContextTypes.DEFAULT_TYPE, url: str, force: bool = False) -> None:
+    try:
+        result = await asyncio.to_thread(pipeline.handle_go_ahead, url, force)
+    except Exception as e:
+        logger.exception("Technical audit failed for %s", url)
+        await reply_target.reply_text(f"Technical audit karte waqt error aaya: {e}")
+        return
+
+    if result.get("blocked"):
+        v = result["verification"]
+        msg_lines = [
+            "⚠️ VERIFICATION FAILED - live page par proposed update ka koi evidence nahi mila.",
+            "",
+            f"Proposed title: \"{v['proposed_title'] or '(none)'}\"",
+            f"Live title abhi bhi: \"{v['live_title'] or '(none)'}\"",
+        ]
+        if v["flaws_still_present"]:
+            msg_lines.append(f"Ye issues abhi bhi live page par hain: {', '.join(v['flaws_still_present'])}")
+        msg_lines += [
+            "",
+            "Pakka confirm karo ki developer ne ye update actually publish kar diya hai.",
+            "Agar update sach me live hai (bas wording thodi alag hai), to 'confirm' likho aage badhne ke liye.",
+            "Agar abhi live nahi hai, to developer se implement karwao, phir dobara 'go ahead' likho.",
+        ]
+        await reply_target.reply_text("\n".join(msg_lines))
+        return
+
+    verification = result.get("verification")
+    caption = "Technical SEO report (is update ke baad)"
+    if verification and verification["status"] == "uncertain":
+        caption += " - note: title/meta hoobahoo match nahi hue, report mein detail dekho"
+
+    await reply_target.reply_document(document=open(result["report_path"], "rb"), caption=caption)
+
+    site = result["site"]
+    if site["stage"] == "MONITORING":
+        await reply_target.reply_text("Content queue khatam. Ab main periodically rankings monitor karunga.")
+    else:
+        await reply_target.reply_text("Agla article likh raha hoon...")
+        await _generate_and_send_next(reply_target, context, url)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not _authorized(update):
@@ -302,25 +348,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if "go ahead" in text_lower or text_lower in ("go", "done", "live ho gaya"):
-        await update.message.reply_text("Live page check kar raha hoon aur agla step shuru kar raha hoon...")
-        try:
-            result = await asyncio.to_thread(pipeline.handle_go_ahead, url)
-        except Exception as e:
-            logger.exception("Technical audit failed for %s", url)
-            await update.message.reply_text(f"Technical audit karte waqt error aaya: {e}")
-            return
+        await update.message.reply_text("Live page check kar raha hoon aur verify kar raha hoon ki update actually gaya hai ya nahi...")
+        await _run_go_ahead(update.message, context, url)
+        return
 
-        await update.message.reply_document(
-            document=open(result["report_path"], "rb"),
-            caption="Technical SEO report (is update ke baad)",
-        )
-
-        site = result["site"]
-        if site["stage"] == "MONITORING":
-            await update.message.reply_text("Content queue khatam. Ab main periodically rankings monitor karunga.")
-        else:
-            await update.message.reply_text("Agla article likh raha hoon...")
-            await _generate_and_send_next(update.message, context, url)
+    if text_lower == "confirm":
+        await update.message.reply_text("Theek hai, force confirm kar ke aage badh raha hoon...")
+        await _run_go_ahead(update.message, context, url, force=True)
         return
 
     await update.message.reply_text("Samajh nahi aaya. 'sent' ya 'go ahead' likho, ya /status check karo.")

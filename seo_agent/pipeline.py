@@ -369,18 +369,69 @@ def mark_sent_to_dev(url: str) -> dict:
     return state_store.update_site(url, stage="AWAITING_DEV_UPDATE")
 
 
-def handle_go_ahead(url: str) -> dict:
+def _verify_go_ahead(proposal: dict, on_page: dict) -> dict:
+    """Checks whether the live page shows real evidence of the proposed
+    update, instead of trusting a bare "go ahead" at face value. An exact
+    title/meta match is one signal, but a developer might reword slightly -
+    so this also re-checks whether the specific flaws the content was meant
+    to fix (missing H1, no schema, thin content, etc.) are actually gone on
+    the live page. If neither signal shows any change at all, that's a
+    strong indicator nothing was actually published yet.
+    """
+    live_title = (on_page.get("title") or "").strip()
+    live_meta = (on_page.get("meta_description") or "").strip()
+    proposed_title = (proposal.get("proposed_title") or "").strip()
+    proposed_meta = (proposal.get("proposed_meta") or "").strip()
+
+    title_match = bool(proposed_title) and live_title == proposed_title
+    meta_match = bool(proposed_meta) and live_meta == proposed_meta
+
+    original_flaws = proposal.get("flaws") or []
+    live_flaws = _compute_page_flaws(on_page)
+    flaws_still_present = [f for f in original_flaws if f in live_flaws]
+    flaws_resolved = [f for f in original_flaws if f not in live_flaws]
+
+    if title_match or meta_match:
+        status = "confirmed"
+    elif original_flaws and flaws_resolved:
+        status = "uncertain"
+    else:
+        status = "likely_not_updated"
+
+    return {
+        "status": status,
+        "title_match": title_match,
+        "meta_match": meta_match,
+        "proposed_title": proposed_title,
+        "live_title": live_title,
+        "proposed_meta": proposed_meta,
+        "live_meta": live_meta,
+        "flaws_resolved": flaws_resolved,
+        "flaws_still_present": flaws_still_present,
+    }
+
+
+def handle_go_ahead(url: str, force: bool = False) -> dict:
     """Called when the user tells the bot the developer has published the
     update. Re-crawls the *specific page* that was just implemented and
-    compares what actually went live against what we proposed (title/meta),
-    plus runs a technical/on-page audit, then either queues the next content
-    piece or moves to monitoring if the queue is empty.
+    checks for real evidence the proposed change actually went live (title/
+    meta match, or the original flaws being resolved). If there's no
+    evidence of any change, this does NOT silently continue to the next
+    queued item - it returns blocked=True so the caller can surface a clear
+    warning and require explicit confirmation, unless force=True.
     """
     site = state_store.get_site(url)
     audit_target = site.get("current_page_url") or url
     proposal = site.get("current_page_proposal") or {}
     audit = site_audit.full_audit(audit_target)
-    report_md = _build_audit_report_md(audit_target, audit, proposal if proposal.get("page_url") == audit_target else None)
+    on_page = audit.get("on_page") or {}
+
+    verification = _verify_go_ahead(proposal, on_page) if proposal.get("page_url") == audit_target else None
+
+    if verification and verification["status"] == "likely_not_updated" and not force:
+        return {"site": site, "verification": verification, "blocked": True}
+
+    report_md = _build_audit_report_md(audit_target, audit, verification)
     report_path = docx_writer.markdown_to_docx(report_md, "technical-seo-report.docx")
 
     if site["content_queue"]:
@@ -388,33 +439,31 @@ def handle_go_ahead(url: str) -> dict:
     else:
         state_store.update_site(url, stage="MONITORING")
 
-    return {"site": state_store.get_site(url), "report_path": report_path, "audit": audit}
+    return {"site": state_store.get_site(url), "report_path": report_path, "audit": audit, "verification": verification, "blocked": False}
 
 
-def _build_audit_report_md(url: str, audit: dict, proposal: dict | None = None) -> str:
+def _build_audit_report_md(url: str, audit: dict, verification: dict | None = None) -> str:
     on_page = audit.get("on_page") or {}
     perf = audit.get("performance") or {}
 
     lines = [f"# Technical SEO Report - {url}", ""]
 
-    if proposal:
-        live_title = on_page.get("title") or ""
-        live_meta = on_page.get("meta_description") or ""
-        proposed_title = proposal.get("proposed_title") or ""
-        proposed_meta = proposal.get("proposed_meta") or ""
-        title_match = bool(proposed_title) and live_title.strip() == proposed_title.strip()
-        meta_match = bool(proposed_meta) and live_meta.strip() == proposed_meta.strip()
-
+    if verification:
+        status_label = {
+            "confirmed": "CONFIRMED - live page matches what was proposed",
+            "uncertain": "PARTIAL - some flaws resolved, but title/meta don't match exactly (developer may have reworded)",
+            "likely_not_updated": "FORCED THROUGH - no evidence the proposed update is live, owner confirmed anyway",
+        }[verification["status"]]
         lines.append("## Proposed vs Live Verification")
-        lines.append(f"- Target keyword: {proposal.get('target_keyword', '(unknown)')}")
-        lines.append(f"- Title - proposed: \"{proposed_title or '(none)'}\"")
-        lines.append(f"- Title - live now: \"{live_title or '(none)'}\"")
-        lines.append(f"- Title match: {'YES' if title_match else 'NO - does not match what was proposed'}")
-        lines.append(f"- Meta description - proposed: \"{proposed_meta or '(none)'}\"")
-        lines.append(f"- Meta description - live now: \"{live_meta or '(none)'}\"")
-        lines.append(f"- Meta description match: {'YES' if meta_match else 'NO - does not match what was proposed'}")
-        if not title_match or not meta_match:
-            lines.append("- Note: a mismatch doesn't necessarily mean the update wasn't applied - the developer may have adjusted wording. Please confirm the live page reflects the sent content.")
+        lines.append(f"- Status: {status_label}")
+        lines.append(f"- Title - proposed: \"{verification['proposed_title'] or '(none)'}\"")
+        lines.append(f"- Title - live now: \"{verification['live_title'] or '(none)'}\"")
+        lines.append(f"- Meta description - proposed: \"{verification['proposed_meta'] or '(none)'}\"")
+        lines.append(f"- Meta description - live now: \"{verification['live_meta'] or '(none)'}\"")
+        if verification["flaws_resolved"]:
+            lines.append(f"- Flaws fixed: {', '.join(verification['flaws_resolved'])}")
+        if verification["flaws_still_present"]:
+            lines.append(f"- Flaws still present: {', '.join(verification['flaws_still_present'])}")
         lines.append("")
 
     lines.append("## On-Page Findings")
