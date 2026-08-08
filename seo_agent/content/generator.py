@@ -61,8 +61,10 @@ Page URL: {page_url}
 Current title: {current_title}
 Current meta description: {current_meta}
 Target keyword: {target_keyword}
-
-Write a complete replacement for this page's content, optimized for the target keyword.
+Known issues with the current page: {flaws}
+{revision_section}
+Write a complete replacement for this page's content, optimized for the target keyword and
+addressing the known issues above.
 
 Requirements:
 - Compelling SEO title (under 60 characters)
@@ -84,7 +86,8 @@ Page URL: {page_url}
 Current title: {current_title}
 Current meta description: {current_meta}
 Target keyword: {target_keyword}
-
+Known issues with the current page: {flaws}
+{revision_section}
 Produce an improved version of this page's content: tighten the title and meta description,
 strengthen headings, close obvious content gaps for the target keyword, and improve the call
 to action - without discarding the page's existing structure and voice.
@@ -95,14 +98,25 @@ Output in clean Markdown with clear ## Title, ## Meta Description, then the page
 """
 
 
-def generate_page_update(page_url: str, mode: str, current_title: str | None, current_meta: str | None, target_keyword: str) -> str:
+def generate_page_update(
+    page_url: str,
+    mode: str,
+    current_title: str | None,
+    current_meta: str | None,
+    target_keyword: str,
+    flaws: list[str] | None = None,
+    revision_notes: str | None = None,
+) -> str:
     model = genai.GenerativeModel(MODEL_NAME)
     template = POLISH_PROMPT if mode == "POLISH" else REWRITE_PROMPT
+    revision_section = f"The project owner asked for this specific revision: \"{revision_notes}\" - prioritize addressing this.\n" if revision_notes else ""
     prompt = template.format(
         page_url=page_url,
         current_title=current_title or "(none)",
         current_meta=current_meta or "(none)",
         target_keyword=target_keyword,
+        flaws=", ".join(flaws) if flaws else "none detected",
+        revision_section=revision_section,
         fact_guardrail=FACT_GUARDRAIL,
     )
     response = model.generate_content(prompt)

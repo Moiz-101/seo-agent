@@ -11,11 +11,15 @@ Flow per website:
          first) for content updates - never invents new pages/topics.
       -> Request Revision asks for free-text notes on what to redo.
       -> Pause freezes the site until you type "resume".
+  Each generated content doc comes with its own Approve Content / Revise
+  Content buttons (or type the same as text). Revise Content regenerates
+  that page's doc incorporating your notes, without touching the queue.
   "sent" (reply after receiving a doc)
       -> marks it as handed to the developer, bot now waits
   "go ahead" (once the developer has published the update live)
-      -> runs a technical/on-page audit of the live page, sends a report,
-         then generates + sends the next article in the queue (loop)
+      -> re-crawls the live page and compares it against what was proposed
+         (title/meta), runs a technical/on-page audit, sends a report, then
+         generates + sends the next article in the queue (loop)
   /status
       -> shows current stage of the active site
   /stop <url>
@@ -59,6 +63,12 @@ def _audit_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("Approve Audit", callback_data="approve_audit"), InlineKeyboardButton("Request Revision", callback_data="request_revision")],
             [InlineKeyboardButton("Scratch Start", callback_data="scratch_start"), InlineKeyboardButton("Pause", callback_data="pause")],
         ]
+    )
+
+
+def _content_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Approve Content", callback_data="approve_content"), InlineKeyboardButton("Revise Content", callback_data="revise_content")]]
     )
 
 
@@ -136,7 +146,11 @@ async def _generate_and_send_next(reply_target, context: ContextTypes.DEFAULT_TY
     site, docx_path = result
     await reply_target.reply_document(
         document=open(docx_path, "rb"),
-        caption=f"Content ready for: {site['published_topics'][-1]}\n\nDeveloper ko de dena, phir 'sent' likh dena.",
+        caption=(
+            f"Content ready for: {site['published_topics'][-1]}\n\n"
+            "Review karo - neeche button dabao (ya text likho). Approve karne ke baad developer ko de dena, phir 'sent' likh dena."
+        ),
+        reply_markup=_content_keyboard(),
     )
 
 
@@ -179,8 +193,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data == "request_revision":
-        state_store.update_site(url, awaiting_revision_input=True)
+        state_store.update_site(url, awaiting_revision_input=True, revision_context="audit")
         await query.message.reply_text("Kya revise karna hai, likh kar bhej do.")
+        return
+
+    if query.data == "approve_content":
+        await query.message.reply_text("Content approve ho gaya. Developer ko de dena, phir 'sent' likh dena.")
+        return
+
+    if query.data == "revise_content":
+        state_store.update_site(url, awaiting_revision_input=True, revision_context="content")
+        await query.message.reply_text("Is content mein kya revise karna hai, likh kar bhej do.")
         return
 
     if query.data == "scratch_start":
@@ -209,7 +232,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     url = active_site["url"]
 
     if active_site.get("awaiting_revision_input"):
-        state_store.update_site(url, awaiting_revision_input=False, revision_notes=text)
+        revision_context = active_site.get("revision_context", "audit")
+        state_store.update_site(url, awaiting_revision_input=False, revision_notes=text, revision_context=None)
+
+        if revision_context == "content":
+            await update.message.reply_text("Content dobara likh raha hoon revision ke saath...")
+            try:
+                site, docx_path = await asyncio.to_thread(pipeline.regenerate_content_with_revision, url, text)
+            except Exception as e:
+                logger.exception("Content revision failed for %s", url)
+                await update.message.reply_text(f"Content revise karte waqt error aaya: {e}")
+                return
+            await update.message.reply_document(
+                document=open(docx_path, "rb"),
+                caption="Revised content ready. Review karo - neeche button dabao (ya text likho).",
+                reply_markup=_content_keyboard(),
+            )
+            return
+
         await update.message.reply_text(
             "Revision note save ho gaya. Jab dobara audit chalana ho, /newsite se re-run kar dena "
             "(ya 'Scratch Start' se aage badho agar ye chhoti si baat thi)."
@@ -239,12 +279,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if text_lower == "request revision":
-        state_store.update_site(url, awaiting_revision_input=True)
+        state_store.update_site(url, awaiting_revision_input=True, revision_context="audit")
         await update.message.reply_text("Kya revise karna hai, likh kar bhej do.")
         return
 
     if text_lower == "scratch start":
         await _start_scratch(update.message, context, url, active_site["stage"])
+        return
+
+    if text_lower == "approve content":
+        await update.message.reply_text("Content approve ho gaya. Developer ko de dena, phir 'sent' likh dena.")
+        return
+
+    if text_lower == "revise content":
+        state_store.update_site(url, awaiting_revision_input=True, revision_context="content")
+        await update.message.reply_text("Is content mein kya revise karna hai, likh kar bhej do.")
         return
 
     if text_lower in ("sent", "sent to dev", "developer ko de diya"):

@@ -230,10 +230,102 @@ def start_scratch(url: str, max_pages_to_optimize: int = 15) -> dict:
     )
 
 
+def _compute_page_flaws(page_data: dict) -> list[str]:
+    """Deterministic (not LLM-guessed) flaw list for a single page, fed into
+    the content-generation prompt and shown to the owner as a strategy
+    brief before the full article - "identify content flaws" +
+    "create a page-level content strategy" as visible steps, not just an
+    implicit jump straight to generated prose.
+    """
+    flaws = []
+    if not page_data.get("title"):
+        flaws.append("missing title tag")
+    elif page_data.get("title_length", 0) > 60:
+        flaws.append("title too long (over 60 characters)")
+    elif page_data.get("title_length", 0) < 20:
+        flaws.append("title too short/thin")
+    if not page_data.get("meta_description"):
+        flaws.append("missing meta description")
+    if page_data.get("h1_count", 0) == 0:
+        flaws.append("missing H1 heading")
+    elif page_data.get("h1_count", 0) > 1:
+        flaws.append("multiple H1 headings")
+    if page_data.get("word_count", 0) < 300:
+        flaws.append("thin content (under 300 words)")
+    if page_data.get("images_missing_alt", 0) > 0:
+        flaws.append(f"{page_data['images_missing_alt']} image(s) missing alt text")
+    if not page_data.get("schema_present"):
+        flaws.append("no structured data")
+    return flaws or ["no major on-page flaws detected - focus on strengthening keyword targeting and content depth"]
+
+
+def _extract_title_meta(article_md: str) -> tuple[str, str]:
+    import re
+
+    title_match = re.search(r"##\s*Title\s*\n+(.+)", article_md)
+    meta_match = re.search(r"##\s*Meta Description\s*\n+(.+)", article_md)
+    return (title_match.group(1).strip() if title_match else ""), (meta_match.group(1).strip() if meta_match else "")
+
+
+def _build_strategy_brief_md(page_url: str, mode: str, target_keyword: str, flaws: list[str]) -> str:
+    lines = [
+        "## Content Strategy Brief",
+        f"- **Page:** {page_url}",
+        f"- **Approach:** {'Polish existing content' if mode == 'POLISH' else 'Rewrite'}",
+        f"- **Target keyword:** {target_keyword}",
+        "- **Flaws identified on the current page:**",
+    ]
+    lines += [f"  - {f}" for f in flaws]
+    lines += ["", "---", ""]
+    return "\n".join(lines)
+
+
+def _generate_content_for_page(url: str, page_url: str, mode: str, stored_title: str | None, stored_meta: str | None, revision_notes: str | None = None) -> tuple[str, str]:
+    """Shared by generate_next_content_doc and regenerate_content_with_revision:
+    fetches live on-page data, computes flaws, generates the article (with the
+    strategy brief prepended), and returns (docx_path, target_keyword). Also
+    stores the proposal (title/meta we're suggesting) in state so a later
+    "go ahead" can verify what actually went live against what we proposed.
+    """
+    try:
+        current = site_audit.audit_on_page(page_url)
+    except Exception:
+        current = {}
+
+    flaws = _compute_page_flaws(current) if current else ["could not re-fetch the live page to check for flaws"]
+    topic = _derive_page_topic(page_url, stored_title or current.get("title"))
+    keyword_ideas = kw_research.autocomplete_only(topic)
+    target_keyword = keyword_ideas[0]["keyword"] if keyword_ideas else topic
+
+    article_md = generator.generate_page_update(
+        page_url=page_url,
+        mode=mode,
+        current_title=current.get("title") or stored_title,
+        current_meta=current.get("meta_description") or stored_meta,
+        target_keyword=target_keyword,
+        flaws=flaws,
+        revision_notes=revision_notes,
+    )
+    proposed_title, proposed_meta = _extract_title_meta(article_md)
+
+    full_md = _build_strategy_brief_md(page_url, mode, target_keyword, flaws) + article_md
+    docx_path = docx_writer.save_article_as_docx(full_md, target_keyword)
+
+    state_store.update_site(
+        url,
+        current_page_proposal={
+            "page_url": page_url, "mode": mode, "target_keyword": target_keyword,
+            "flaws": flaws, "proposed_title": proposed_title, "proposed_meta": proposed_meta,
+        },
+    )
+    return docx_path, target_keyword
+
+
 def generate_next_content_doc(url: str) -> tuple[dict, str] | None:
-    """Pops the next page off the queue, generates its updated content,
-    saves it as a .docx, returns (site, docx_path). Returns None if the
-    queue is empty (site should move to MONITORING).
+    """Pops the next page off the queue, generates its updated content
+    (with a content-strategy brief prepended), saves it as a .docx, returns
+    (site, docx_path). Returns None if the queue is empty (site should move
+    to MONITORING).
     """
     site = state_store.get_site(url)
     queue = site["content_queue"]
@@ -242,24 +334,7 @@ def generate_next_content_doc(url: str) -> tuple[dict, str] | None:
 
     item = queue[0]
     page_url = item["url"]
-
-    try:
-        current = site_audit.audit_on_page(page_url)
-    except Exception:
-        current = {}
-
-    topic = _derive_page_topic(page_url, item.get("title") or current.get("title"))
-    keyword_ideas = kw_research.autocomplete_only(topic)
-    target_keyword = keyword_ideas[0]["keyword"] if keyword_ideas else topic
-
-    article_md = generator.generate_page_update(
-        page_url=page_url,
-        mode=item["mode"],
-        current_title=current.get("title") or item.get("title"),
-        current_meta=current.get("meta_description") or item.get("meta_description"),
-        target_keyword=target_keyword,
-    )
-    docx_path = docx_writer.save_article_as_docx(article_md, target_keyword)
+    docx_path, target_keyword = _generate_content_for_page(url, page_url, item["mode"], item.get("title"), item.get("meta_description"))
 
     remaining_queue = queue[1:]
     published = site["published_topics"] + [page_url]
@@ -273,21 +348,39 @@ def generate_next_content_doc(url: str) -> tuple[dict, str] | None:
     return site, docx_path
 
 
+def regenerate_content_with_revision(url: str, revision_notes: str) -> tuple[dict, str]:
+    """Redoes the *current* page's content (the one already sent, not yet
+    popped further) incorporating the owner's revision request - actually
+    acts on the feedback rather than just filing a note away.
+    """
+    site = state_store.get_site(url)
+    proposal = site.get("current_page_proposal") or {}
+    page_url = site.get("current_page_url")
+    if not page_url:
+        raise ValueError("No current page content to revise")
+
+    docx_path, _ = _generate_content_for_page(
+        url, page_url, proposal.get("mode", "REWRITE"), proposal.get("proposed_title"), proposal.get("proposed_meta"), revision_notes=revision_notes
+    )
+    return state_store.get_site(url), docx_path
+
+
 def mark_sent_to_dev(url: str) -> dict:
     return state_store.update_site(url, stage="AWAITING_DEV_UPDATE")
 
 
 def handle_go_ahead(url: str) -> dict:
     """Called when the user tells the bot the developer has published the
-    update. Runs a technical/on-page audit of the *specific page* that was
-    just implemented (not just the site's homepage) and produces a report
-    doc, then either queues the next content piece or moves to monitoring
-    if the queue is empty.
+    update. Re-crawls the *specific page* that was just implemented and
+    compares what actually went live against what we proposed (title/meta),
+    plus runs a technical/on-page audit, then either queues the next content
+    piece or moves to monitoring if the queue is empty.
     """
     site = state_store.get_site(url)
     audit_target = site.get("current_page_url") or url
+    proposal = site.get("current_page_proposal") or {}
     audit = site_audit.full_audit(audit_target)
-    report_md = _build_audit_report_md(audit_target, audit)
+    report_md = _build_audit_report_md(audit_target, audit, proposal if proposal.get("page_url") == audit_target else None)
     report_path = docx_writer.markdown_to_docx(report_md, "technical-seo-report.docx")
 
     if site["content_queue"]:
@@ -298,11 +391,32 @@ def handle_go_ahead(url: str) -> dict:
     return {"site": state_store.get_site(url), "report_path": report_path, "audit": audit}
 
 
-def _build_audit_report_md(url: str, audit: dict) -> str:
+def _build_audit_report_md(url: str, audit: dict, proposal: dict | None = None) -> str:
     on_page = audit.get("on_page") or {}
     perf = audit.get("performance") or {}
 
     lines = [f"# Technical SEO Report - {url}", ""]
+
+    if proposal:
+        live_title = on_page.get("title") or ""
+        live_meta = on_page.get("meta_description") or ""
+        proposed_title = proposal.get("proposed_title") or ""
+        proposed_meta = proposal.get("proposed_meta") or ""
+        title_match = bool(proposed_title) and live_title.strip() == proposed_title.strip()
+        meta_match = bool(proposed_meta) and live_meta.strip() == proposed_meta.strip()
+
+        lines.append("## Proposed vs Live Verification")
+        lines.append(f"- Target keyword: {proposal.get('target_keyword', '(unknown)')}")
+        lines.append(f"- Title - proposed: \"{proposed_title or '(none)'}\"")
+        lines.append(f"- Title - live now: \"{live_title or '(none)'}\"")
+        lines.append(f"- Title match: {'YES' if title_match else 'NO - does not match what was proposed'}")
+        lines.append(f"- Meta description - proposed: \"{proposed_meta or '(none)'}\"")
+        lines.append(f"- Meta description - live now: \"{live_meta or '(none)'}\"")
+        lines.append(f"- Meta description match: {'YES' if meta_match else 'NO - does not match what was proposed'}")
+        if not title_match or not meta_match:
+            lines.append("- Note: a mismatch doesn't necessarily mean the update wasn't applied - the developer may have adjusted wording. Please confirm the live page reflects the sent content.")
+        lines.append("")
+
     lines.append("## On-Page Findings")
     lines.append(f"- Title: {on_page.get('title')} ({on_page.get('title_length')} chars)")
     lines.append(f"- Meta description: {on_page.get('meta_description')} ({on_page.get('meta_description_length')} chars)")
