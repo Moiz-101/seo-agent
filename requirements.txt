@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks]==22.8
+python-telegram-bot[webhooks,job-queue]==22.8
 upstash-redis==1.2.0
 python-dotenv==1.0.1
 python-docx==1.1.2

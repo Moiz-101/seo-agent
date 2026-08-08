@@ -24,10 +24,18 @@ Flow per website:
          anyway, or fix it live and say "go ahead" again.
       -> once verified, runs a technical/on-page audit, sends a report, then
          generates + sends the next article in the queue (loop)
+  Content queue empty -> MONITORING: roughly once a day, re-checks the
+      homepage + previously updated pages for regressions (page down, a
+      fixed issue reappearing) and, if Search Console happens to be
+      connected for that exact site, a keyword-position snapshot. Only
+      messages when something actually changed. Runs via Telegram's
+      JobQueue in this same process, so on Render's free tier a check can
+      run late if the service was asleep - it fires on the next wake-up
+      instead of being silently skipped.
   /status
       -> shows current stage of the active site
   /stop <url>
-      -> stops the agent working on that site
+      -> stops the agent working on that site (also cancels monitoring)
 """
 import asyncio
 import logging
@@ -43,6 +51,63 @@ from seo_agent.storage import state_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Once a site's content queue is exhausted it moves to MONITORING - checked
+# roughly once a day after that. Render's free web service sleeps after ~15
+# min idle, so this in-process scheduler only fires while the dyno is awake;
+# an overdue check simply runs on the next request that wakes it, rather
+# than at the exact scheduled time. That's an honest trade-off for a
+# free-tier setup with no external cron account required.
+MONITORING_INTERVAL_SECONDS = 24 * 60 * 60
+MONITORING_FIRST_CHECK_SECONDS = 60 * 60
+
+
+def _monitoring_job_name(url: str) -> str:
+    return f"monitor:{url}"
+
+
+def _schedule_monitoring(job_queue, url: str) -> None:
+    if job_queue is None or not config.TELEGRAM_ALLOWED_USER_ID:
+        return
+    _cancel_monitoring(job_queue, url)
+    job_queue.run_repeating(
+        _monitoring_tick,
+        interval=MONITORING_INTERVAL_SECONDS,
+        first=MONITORING_FIRST_CHECK_SECONDS,
+        data=url,
+        name=_monitoring_job_name(url),
+    )
+
+
+def _cancel_monitoring(job_queue, url: str) -> None:
+    if job_queue is None:
+        return
+    for job in job_queue.get_jobs_by_name(_monitoring_job_name(url)):
+        job.schedule_removal()
+
+
+async def _monitoring_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    url = context.job.data
+    site = state_store.get_site(url)
+    if not site or site.get("stage") != "MONITORING" or not site.get("active"):
+        _cancel_monitoring(context.job_queue, url)  # stale job left over from a stage/state change
+        return
+
+    try:
+        result = await asyncio.to_thread(pipeline.check_monitoring, url)
+    except Exception:
+        logger.exception("Monitoring check failed for %s", url)
+        return
+
+    chat_id = int(config.TELEGRAM_ALLOWED_USER_ID)
+    if result["is_first_check"]:
+        note = " (GSC connected)" if result["gsc_available"] else ""
+        await context.bot.send_message(chat_id=chat_id, text=f"Monitoring baseline set kar diya hai: {url}{note}")
+        return
+
+    if result["changes"]:
+        text = f"📡 Monitoring update - {url}\n\n" + "\n".join(result["changes"])
+        await context.bot.send_message(chat_id=chat_id, text=text)
 
 
 def _zip_xlsx_package(xlsx_paths: dict, url: str) -> str:
@@ -144,7 +209,8 @@ async def _generate_and_send_next(reply_target, context: ContextTypes.DEFAULT_TY
 
     if result is None:
         state_store.update_site(url, stage="MONITORING")
-        await reply_target.reply_text("Saara planned content bhej diya gaya hai. Ab sirf ranking monitor karunga.")
+        _schedule_monitoring(context.job_queue, url)
+        await reply_target.reply_text("Saara planned content bhej diya gaya hai. Ab periodically health/ranking monitor karunga.")
         return
 
     site, docx_path = result
@@ -214,7 +280,8 @@ async def _run_go_ahead(reply_target, context: ContextTypes.DEFAULT_TYPE, url: s
 
     site = result["site"]
     if site["stage"] == "MONITORING":
-        await reply_target.reply_text("Content queue khatam. Ab main periodically rankings monitor karunga.")
+        _schedule_monitoring(context.job_queue, url)
+        await reply_target.reply_text("Content queue khatam. Ab periodically health/ranking monitor karunga.")
     else:
         await reply_target.reply_text("Agla article likh raha hoon...")
         await _generate_and_send_next(reply_target, context, url)
@@ -260,6 +327,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if active_site["stage"] == "PAUSED":
             await query.message.reply_text(f"'{url}' pehle se paused hai.")
             return
+        _cancel_monitoring(context.job_queue, url)
         state_store.update_site(url, stage="PAUSED", paused_from_stage=active_site["stage"])
         await query.message.reply_text(f"'{url}' pause kar diya. Resume karne ke liye 'resume' likho.")
         return
@@ -308,6 +376,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         restored_stage = active_site.get("paused_from_stage", "AUDIT_READY")
         state_store.update_site(url, stage=restored_stage)
+        if restored_stage == "MONITORING":
+            _schedule_monitoring(context.job_queue, url)
         await update.message.reply_text(f"'{url}' resume ho gaya, stage: {restored_stage}")
         return
 
@@ -315,6 +385,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if active_site["stage"] == "PAUSED":
             await update.message.reply_text(f"'{url}' pehle se paused hai.")
             return
+        _cancel_monitoring(context.job_queue, url)
         state_store.update_site(url, stage="PAUSED", paused_from_stage=active_site["stage"])
         await update.message.reply_text(f"'{url}' pause kar diya. Resume karne ke liye 'resume' likho.")
         return
@@ -379,6 +450,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Format: /stop https://example.com")
         return
     url = context.args[0]
+    _cancel_monitoring(context.job_queue, url)
     state_store.stop_site(url)
     await update.message.reply_text(f"{url} par kaam rok diya gaya.")
 
@@ -394,6 +466,18 @@ def main() -> None:
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # JobQueue state lives only in this process's memory - every Render
+    # restart/redeploy loses it. Re-register monitoring jobs for whatever
+    # sites are still in MONITORING so a redeploy doesn't silently kill
+    # ongoing checks.
+    rehydrated = 0
+    for site in state_store.list_sites():
+        if site.get("stage") == "MONITORING" and site.get("active"):
+            _schedule_monitoring(app.job_queue, site["url"])
+            rehydrated += 1
+    if rehydrated:
+        logger.info("Rehydrated %d monitoring job(s) after startup.", rehydrated)
 
     if config.WEBHOOK_URL:
         logger.info("Bot starting in webhook mode on port %s...", config.PORT)

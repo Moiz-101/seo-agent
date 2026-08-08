@@ -18,8 +18,11 @@ Stages:
                           rankings until the user stops the site
   STOPPED               -> user said stop
 """
+import os
+from datetime import datetime
 from urllib.parse import urlparse
 
+import config
 from seo_agent.storage import state_store
 from seo_agent.research import site_audit
 from seo_agent.research import site_crawler
@@ -29,6 +32,7 @@ from seo_agent.research import keywords as kw_research
 from seo_agent.research import competitors as competitor_research
 from seo_agent.content import generator, docx_writer
 from seo_agent.reporting import pdf_report, xlsx_export, consistency_check
+from seo_agent.tracking import search_console
 
 
 def start_new_site(url: str) -> dict:
@@ -230,12 +234,14 @@ def start_scratch(url: str, max_pages_to_optimize: int = 15) -> dict:
     )
 
 
-def _compute_page_flaws(page_data: dict) -> list[str]:
+def _compute_page_flaws(page_data: dict, use_fallback_message: bool = True) -> list[str]:
     """Deterministic (not LLM-guessed) flaw list for a single page, fed into
     the content-generation prompt and shown to the owner as a strategy
     brief before the full article - "identify content flaws" +
     "create a page-level content strategy" as visible steps, not just an
-    implicit jump straight to generated prose.
+    implicit jump straight to generated prose. Also reused by monitoring
+    (use_fallback_message=False there) to diff real flaw sets between
+    checks without a placeholder string polluting the comparison.
     """
     flaws = []
     if not page_data.get("title"):
@@ -256,7 +262,9 @@ def _compute_page_flaws(page_data: dict) -> list[str]:
         flaws.append(f"{page_data['images_missing_alt']} image(s) missing alt text")
     if not page_data.get("schema_present"):
         flaws.append("no structured data")
-    return flaws or ["no major on-page flaws detected - focus on strengthening keyword targeting and content depth"]
+    if flaws or not use_fallback_message:
+        return flaws
+    return ["no major on-page flaws detected - focus on strengthening keyword targeting and content depth"]
 
 
 def _extract_title_meta(article_md: str) -> tuple[str, str]:
@@ -490,3 +498,78 @@ def _build_audit_report_md(url: str, audit: dict, verification: dict | None = No
         lines.append("- Add descriptive alt text to all images.")
 
     return "\n".join(lines)
+
+
+def check_monitoring(url: str) -> dict:
+    """One periodic health/ranking check for a MONITORING-stage site. Re-audits
+    a small sample of pages (the homepage plus pages this agent has already
+    updated) using the same on-page checks used everywhere else in the app,
+    and diffs the result against the last stored snapshot so only real
+    changes get reported instead of a noisy restatement of steady state.
+
+    Search Console is used opportunistically - only if it's configured
+    globally (config.GSC_SITE_URL) and happens to match this exact site,
+    since there's no per-site GSC connection flow yet. When it's not
+    available, this relies entirely on crawl-based health signals, which
+    need no extra setup.
+    """
+    site = state_store.get_site(url)
+    sample_urls = list(dict.fromkeys([url] + (site.get("published_topics") or [])[-9:]))
+
+    page_results = []
+    for page_url in sample_urls:
+        try:
+            on_page = site_audit.audit_on_page(page_url)
+            page_results.append({"url": page_url, "up": True, "flaws": _compute_page_flaws(on_page, use_fallback_message=False)})
+        except Exception as e:
+            page_results.append({"url": page_url, "up": False, "error": str(e)[:200], "flaws": []})
+
+    gsc_snapshot = None
+    if config.GSC_SITE_URL and config.GSC_SITE_URL.rstrip("/") == url.rstrip("/") and os.path.exists(config.GSC_SERVICE_ACCOUNT_FILE):
+        try:
+            gsc_snapshot = search_console.get_keyword_performance(days=28, row_limit=20)
+        except Exception:
+            gsc_snapshot = None  # best-effort only - GSC not connected/usable for this site
+
+    previous_snapshot = site.get("monitoring_snapshot") or {}
+    is_first_check = not previous_snapshot
+    changes = [] if is_first_check else _diff_monitoring_snapshots(
+        previous_snapshot.get("pages") or [], page_results, previous_snapshot.get("gsc"), gsc_snapshot
+    )
+
+    new_snapshot = {"checked_at": datetime.utcnow().isoformat(), "pages": page_results, "gsc": gsc_snapshot}
+    state_store.update_site(url, monitoring_snapshot=new_snapshot)
+
+    return {"changes": changes, "is_first_check": is_first_check, "gsc_available": gsc_snapshot is not None}
+
+
+def _diff_monitoring_snapshots(previous_pages: list[dict], current_pages: list[dict], previous_gsc, current_gsc) -> list[str]:
+    changes = []
+    previous_by_url = {p["url"]: p for p in previous_pages}
+
+    for current in current_pages:
+        prev = previous_by_url.get(current["url"])
+        if prev is None:
+            continue  # first time this page has been sampled - nothing to diff against yet
+
+        if prev.get("up") and not current.get("up"):
+            changes.append(f"⚠️ {current['url']} ab live nahi hai ({current.get('error', 'unreachable')})")
+        elif not prev.get("up") and current.get("up"):
+            changes.append(f"✅ {current['url']} wapas live ho gaya hai")
+
+        if current.get("up"):
+            prev_flaws = set(prev.get("flaws") or [])
+            current_flaws = set(current.get("flaws") or [])
+            for f in current_flaws - prev_flaws:
+                changes.append(f"⚠️ {current['url']}: naya issue - {f}")
+            for f in prev_flaws - current_flaws:
+                changes.append(f"✅ {current['url']}: fix ho gaya - {f}")
+
+    if previous_gsc and current_gsc:
+        prev_avg = sum(r["position"] for r in previous_gsc) / len(previous_gsc)
+        curr_avg = sum(r["position"] for r in current_gsc) / len(current_gsc)
+        if abs(curr_avg - prev_avg) >= 1:
+            direction = "improve hui" if curr_avg < prev_avg else "gir gayi"
+            changes.append(f"\U0001f4ca Average keyword position {direction}: {prev_avg:.1f} -> {curr_avg:.1f}")
+
+    return changes

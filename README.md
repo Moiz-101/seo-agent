@@ -3,13 +3,22 @@
 Telegram par website bhejo (`/newsite <url>`) -> agent **poori site crawl karke
 agency-style audit PDF** banata hai (screenshots, charts, scores) — koi bhi
 content ya changes tab tak nahi hote. Audit review karne ke baad **"Scratch
-Start"** bolo tab agent kaam shuru karta hai [is phase ka code abhi is build
-mein nahi hai — audit tak ban chuka hai, aage ka phase alag se aayega].
+Start"** bolo tab agent existing pages par kaam shuru karta hai: content
+flaws identify karta hai, ek strategy brief ke saath rewrite/polish content
+generate karta hai (Approve/Revise buttons ke saath), "sent"/"go ahead" review
+loop se developer ke saath sync rehta hai, aur "go ahead" par live page ko
+proposed update ke against verify karta hai (agar evidence nahi milta to
+silently aage nahi badhta — explicit "confirm" maangta hai).
 
-Aage ka planned flow: existing pages ko polish/rewrite karna (naye pages khud
-se nahi banayega), on-page optimization, Search Console resubmission,
-technical/local/off-page SEO, aur "sent"/"go ahead" review loop se developer
-ke saath sync rehna, aakhir mein ongoing rank monitoring jab tak "/stop" na bolo.
+Content queue khatam hone ke baad site **MONITORING** stage mein chali jaati
+hai: roughly ek din mein ek baar homepage + pehle update ki gayi pages
+re-check hoti hain (page down, koi fix hua issue wapas aana), aur agar Search
+Console connect hai to keyword-position snapshot bhi. Sirf tab message aata
+hai jab kuch real change ho — "/stop" bolne tak chalta rehta hai.
+
+Planned but not yet built: Search Console sitemap resubmission + per-page
+index-status check after "go ahead", aur off-page/local SEO opportunity
+checklist.
 
 ## Kaunse tools/keys chahiye (sab free)
 
@@ -19,7 +28,7 @@ ke saath sync rehna, aakhir mein ongoing rank monitoring jab tak "/stop" na bolo
 | Apna Telegram User ID | [@userinfobot](https://t.me/userinfobot) ko message karo | 1 min |
 | Gemini API key (content likhne ke liye) | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | 2 min |
 | PageSpeed Insights API key (site speed audit) | [Google Cloud Console](https://console.cloud.google.com/apis/library/pagespeedonline.googleapis.com) -> Enable API -> Credentials -> Create API key | 5 min |
-| Search Console access (rank tracking) | Google Cloud Console -> Service Account bana kar JSON key download karo, phir uska email Search Console property mein "Full user" add karo | 10 min |
+| Search Console access (rank tracking, optional) | Google Cloud Console -> Service Account bana kar JSON key download karo, phir uska email Search Console property mein "Full user" add karo. **Optional** — sirf ek global site ke liye currently supported hai (per-site connection flow abhi nahi bana), MONITORING isko opportunistically use karta hai agar mila to, warna crawl-based checks pe hi chalta hai. | 10 min |
 | Open PageRank API key (authority score) | [openpagerank.keywordseverywhere.com/dashboard](https://openpagerank.keywordseverywhere.com/dashboard) -> free Keywords Everywhere account bana kar sign in -> dashboard se OpenPageRank key generate karo | 3 min |
 
 Koi bhi in mein se paid nahi hai. Gemini aur PageSpeed dono free-tier quota ke
@@ -113,13 +122,14 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
 
 - `/newsite <url>` — poori site crawl + audit PDF (screenshots, charts, scores, broken links, page-by-page appendix)
 - Audit PDF ke saath **buttons** milte hain (ya wahi text likh sakte ho): `Approve Audit`, `Request Revision`, `Scratch Start`, `Pause`
-  - `Scratch Start` — existing pages (sabse zyada issues wale pehle) content-update ke liye queue ho jate hain, naye pages kabhi invent nahi karta
+  - `Scratch Start` — existing pages (sabse zyada issues wale pehle) content-update ke liye queue ho jate hain, naye pages kabhi invent nahi karta. Har page ke content doc ke saath ek strategy brief (target keyword + flaws found) hoti hai
   - `Request Revision` — agla message jo bhejoge wo revision note ke roop mein save ho jayega
-  - `Pause` / `resume` — site ka kaam temporarily rok/shuru karo (`/stop` permanent hai, ye nahi)
+  - `Pause` / `resume` — site ka kaam temporarily rok/shuru karo (`/stop` permanent hai, ye nahi) — monitoring bhi pause/resume ke saath rukta/chalta hai
+- Har content doc ke saath `Approve Content` / `Revise Content` buttons — Revise us specific page ka doc dobara likhta hai revision notes ke saath, baaki queue nahi chhedta
 - `sent` — bolo jab doc developer ko de diya
-- `go ahead` — bolo jab developer ne live update kar diya (agla step trigger karta hai, us specific page ka audit karta hai jo abhi update hui)
+- `go ahead` — bolo jab developer ne live update kar diya. Live page ko proposed update ke against verify karta hai (title/meta match ya flagged flaws fix hue) — evidence na mile to block kar deta hai aur "confirm" maangta hai force-proceed ke liye
 - `/status` — sab tracked sites ka current stage
-- `/stop <url>` — kisi site par kaam rokna
+- `/stop <url>` — kisi site par kaam rokna (monitoring bhi cancel ho jaati hai)
 
 ## Free-tier limitations (transparent rehna zaroori hai)
 
@@ -137,9 +147,16 @@ webhook delivery retry karta hai), bas pehla reply thoda late aa sakta hai.
   fake number nahi.
 - **Crawl** max 200 pages tak capped hai (Render free tier ke time/resource
   budget ke liye) — bade sites ka partial audit hoga, report mein note hoga.
-- **Search Console "submission"** ka matlab sitemap resubmit + index-status
-  check hai (real, supported APIs) — Google arbitrary pages ko force-index
-  karne ka free API nahi deta, isliye wo claim nahi kiya jayega.
+- **Search Console** abhi sirf MONITORING stage mein opportunistic keyword-
+  position snapshot ke liye use hoti hai (agar `GSC_SITE_URL` configure ho
+  aur exact match ho us site se). Sitemap resubmit + index-status check
+  (real, supported APIs) **planned hai, abhi implement nahi hua** — jab
+  banega tab bhi Google arbitrary pages ko force-index karne ka free API
+  nahi deta, isliye wo claim nahi kiya jayega.
+- **MONITORING** Render ke free-tier web service pe chalti hai jo ~15 min
+  idle ke baad so jaata hai — is liye check "roughly daily" hai, exact time
+  pe nahi. Overdue check dyno ke agle wake-up (koi bhi Telegram request) par
+  turant chal jaata hai, silently skip nahi hota.
 - **Keyword volume**: exact search volume ke liye paid tools (Ahrefs/SEMrush)
   chahiye. Yahan Google Trends + DuckDuckGo autocomplete (dono free) use ho
   rahe hain jo directionally sahi hain, exact numbers nahi.
@@ -174,6 +191,6 @@ seo_agent/
     generator.py                     Gemini article writer
     docx_writer.py                    markdown -> Word doc
   tracking/
-    search_console.py                 GSC rank/traffic API
+    search_console.py                 GSC rank/traffic API (used opportunistically by MONITORING)
 data/                             generated docs + audit PDFs + state (gitignored)
 ```
